@@ -25,7 +25,7 @@ import decimal
 import hashlib
 import json
 import pathlib
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 # Two decimal places, half-up: how a ledger rounds. Python's default is
@@ -36,6 +36,24 @@ MONEY = decimal.Decimal("0.01")
 def money(value: decimal.Decimal | int | str) -> decimal.Decimal:
     """Quantise to two decimal places, rounding half-up."""
     return decimal.Decimal(value).quantize(MONEY, rounding=decimal.ROUND_HALF_UP)
+
+
+class _HashingTee:
+    """A text sink that forwards writes and hashes them on the way through.
+
+    `csv.writer` only needs `.write`, so this keeps the digest and the file
+    byte-for-byte in agreement without a second pass over the data.
+    """
+
+    __slots__ = ("_digest", "_fh")
+
+    def __init__(self, fh: Any, digest: Any) -> None:
+        self._fh = fh
+        self._digest = digest
+
+    def write(self, text: str) -> int:
+        self._digest.update(text.encode("utf-8"))
+        return self._fh.write(text)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -100,23 +118,30 @@ def _render(value: Any) -> str:
     return str(value)
 
 
-def write_extract(
+def write_extract_streaming(
     spec: ExtractSpec,
-    rows: Sequence[dict[str, Any]],
+    chunks: Iterable[Sequence[dict[str, Any]]],
     out_dir: pathlib.Path,
     generated_at: dt.datetime,
 ) -> WrittenExtract:
-    """Write one extract and its control-totals sidecar.
+    """Write an extract from an iterable of row chunks.
+
+    Peak memory is a function of chunk size, not row count. The 5M-row MES
+    feed held as Python dicts would be about 4.3 GB -- measured at 929 bytes
+    per row on the inventory slice -- which is why generation streams
+    (ADR-024, BTB-36).
+
+    The row count, value total and SHA-256 accumulate as chunks are written,
+    so nothing is computed by iterating the data a second time. The hash is
+    computed from the bytes as they are written rather than by re-reading the
+    finished file, which also means it covers exactly what was written.
 
     Args:
         spec: The extract's shape.
-        rows: Row dicts. Every key in ``spec.columns`` must be present; an
-            unexpected key is an error rather than being dropped, because a
-            silently ignored column is how a field goes missing downstream.
+        chunks: Iterable of row-dict sequences. May be a generator.
         out_dir: Directory to write into.
-        generated_at: Run timestamp, recorded in the sidecar. The CSV itself
-            carries no run timestamp, so two runs with the same seed produce
-            byte-identical CSVs.
+        generated_at: Run timestamp for the sidecar. The CSV carries no
+            timestamp, so two runs with the same seed are byte-identical.
 
     Returns:
         What was written, including the file's SHA-256.
@@ -125,66 +150,116 @@ def write_extract(
     path = out_dir / f"{spec.name}.csv"
 
     expected = set(spec.columns)
-    for index, row in enumerate(rows):
-        unexpected = set(row) - expected
-        if unexpected:
-            raise ValueError(
-                f"{spec.name} row {index} has unexpected columns: {sorted(unexpected)}"
-            )
-        missing = expected - set(row)
-        if missing:
-            raise ValueError(f"{spec.name} row {index} is missing columns: {sorted(missing)}")
+    columns = list(spec.columns)
+
+    row_count = 0
+    value_total = decimal.Decimal("0") if spec.value_column is not None else None
+    digest = hashlib.sha256()
 
     # newline="" plus an explicit \r\n keeps the bytes identical on every
     # platform, which the determinism test depends on.
     with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh, lineterminator="\r\n")
-        writer.writerow(spec.columns)
-        for row in rows:
-            writer.writerow([_render(row[column]) for column in spec.columns])
+        # Tee every write into the hash. Hashing here rather than re-reading
+        # the finished file means the digest covers exactly the bytes csv
+        # produced -- and at 5M rows, re-reading would double the I/O.
+        tee = _HashingTee(fh, digest)
+        writer = csv.writer(tee, lineterminator="\r\n")
+        writer.writerow(columns)
 
-    value_total: decimal.Decimal | None = None
-    if spec.value_column is not None:
-        # The value column must already be ledger-rounded to two places. If the
-        # CSV carries 10.005 while the sidecar carries 10.01, a loader that sums
-        # the file disagrees with the control total by a cent and CTRL-001 fails
-        # for a rounding reason rather than a completeness one -- which is how a
-        # real control gets switched off. Quantising silently here would hide
-        # the generator bug instead, so this is an error.
-        for index, row in enumerate(rows):
-            amount = row[spec.value_column]
-            if isinstance(amount, decimal.Decimal) and amount.as_tuple().exponent < -2:
-                raise ValueError(
-                    f"{spec.name} row {index}: {spec.value_column}={amount} has more than "
-                    f"two decimal places; apply money() before writing so the extract and "
-                    f"its control total re-add to the same value"
-                )
-        value_total = money(sum((row[spec.value_column] for row in rows), decimal.Decimal("0")))
+        for chunk in chunks:
+            for index, row in enumerate(chunk):
+                unexpected = set(row) - expected
+                if unexpected:
+                    raise ValueError(
+                        f"{spec.name} row {row_count + index} has unexpected "
+                        f"columns: {sorted(unexpected)}"
+                    )
+                missing = expected - set(row)
+                if missing:
+                    raise ValueError(
+                        f"{spec.name} row {row_count + index} is missing columns: {sorted(missing)}"
+                    )
+                if value_total is not None:
+                    amount = row[spec.value_column]
+                    if isinstance(amount, decimal.Decimal) and amount.as_tuple().exponent < -2:
+                        raise ValueError(
+                            f"{spec.name} row {row_count + index}: "
+                            f"{spec.value_column}={amount} has more than two decimal "
+                            f"places; apply money() before writing so the extract and "
+                            f"its control total re-add to the same value"
+                        )
+                    value_total += amount
+                writer.writerow([_render(row[column]) for column in columns])
+            row_count += len(chunk)
 
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if value_total is not None:
+        value_total = money(value_total)
 
-    control_totals_path = out_dir / f"{spec.name}.control_totals.json"
-    payload: dict[str, Any] = {
-        "extract": spec.name,
-        "source_system": spec.source_system,
-        "row_count": len(rows),
-        "value_column": spec.value_column,
-        "value_total": str(value_total) if value_total is not None else None,
-        "natural_key": list(spec.natural_key),
-        "sha256": digest,
-        "generated_at": generated_at.replace(microsecond=0).isoformat(),
-        "notice": "SYNTHETIC DATA. Simulated, SOX-style controls. Not SOX compliant.",
-    }
-    control_totals_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    sha256 = digest.hexdigest()
+    control_totals_path = _write_control_totals(
+        spec, out_dir, row_count, value_total, sha256, generated_at
+    )
 
     return WrittenExtract(
         spec=spec,
         path=path,
         control_totals_path=control_totals_path,
-        row_count=len(rows),
+        row_count=row_count,
         value_total=value_total,
-        sha256=digest,
+        sha256=sha256,
     )
+
+
+def _write_control_totals(
+    spec: ExtractSpec,
+    out_dir: pathlib.Path,
+    row_count: int,
+    value_total: decimal.Decimal | None,
+    sha256: str,
+    generated_at: dt.datetime,
+) -> pathlib.Path:
+    """Write the sidecar. One implementation, used by both write paths."""
+    control_totals_path = out_dir / f"{spec.name}.control_totals.json"
+    payload: dict[str, Any] = {
+        "extract": spec.name,
+        "source_system": spec.source_system,
+        "row_count": row_count,
+        "value_column": spec.value_column,
+        "value_total": str(value_total) if value_total is not None else None,
+        "natural_key": list(spec.natural_key),
+        "sha256": sha256,
+        "generated_at": generated_at.replace(microsecond=0).isoformat(),
+        "notice": "SYNTHETIC DATA. Simulated, SOX-style controls. Not SOX compliant.",
+    }
+    control_totals_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return control_totals_path
+
+
+def write_extract(
+    spec: ExtractSpec,
+    rows: Sequence[dict[str, Any]],
+    out_dir: pathlib.Path,
+    generated_at: dt.datetime,
+) -> WrittenExtract:
+    """Write one extract and its control-totals sidecar.
+
+    Convenience wrapper over `write_extract_streaming` for callers that
+    already hold every row -- the small extracts, and the tests. It delegates
+    rather than duplicating, so the streamed and in-memory paths cannot
+    produce different bytes for the same data; a test asserts they agree.
+
+    Args:
+        spec: The extract's shape.
+        rows: Row dicts. Every key in ``spec.columns`` must be present; an
+            unexpected key is an error rather than being dropped, because a
+            silently ignored column is how a field goes missing downstream.
+        out_dir: Directory to write into.
+        generated_at: Run timestamp, recorded in the sidecar.
+
+    Returns:
+        What was written, including the file's SHA-256.
+    """
+    return write_extract_streaming(spec, [rows], out_dir, generated_at)
 
 
 def read_control_totals(path: pathlib.Path) -> dict[str, Any]:

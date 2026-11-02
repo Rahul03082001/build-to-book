@@ -14,6 +14,7 @@ import argparse
 import pathlib
 import sys
 
+from generator import dataset
 from ingestion import db, loader, schemas
 
 BANNER = "SYNTHETIC DATA -- simulated, SOX-style controls. Not SOX compliant."
@@ -44,18 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# Order matters: masters before the documents that reference them, so a
-# foreign-key problem surfaces against data that is already present.
-LOAD_ORDER = [
-    "materials",
-    "suppliers",
-    "standard_costs",
-    "purchase_order_headers",
-    "purchase_order_lines",
-    "goods_movements",
-    "inventory_revaluations",
-    "gl_postings",
-]
+# Taken from the generator rather than restated here. Two lists would drift the
+# moment a source system is added -- and the symptom would be an extract that
+# generates fine and silently never loads.
+LOAD_ORDER = list(dataset.LOAD_ORDER)
 
 
 def main(argv: list[str] | None = None) -> int:

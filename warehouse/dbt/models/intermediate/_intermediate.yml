@@ -1,0 +1,75 @@
+version: 2
+
+models:
+  - name: int_bom_exploded
+    description: >
+      GRAIN: one row per (top-level parent, component, path through the BOM).
+
+      Explodes the parent-child BOM into component requirements with a
+      recursive CTE (ADR-025), multiplying quantities down each path. A
+      component reachable by more than one path -- the same tray goes into
+      several rack configurations -- appears once per path; consumers sum them.
+
+      Guarded two ways against a cyclic BOM: a depth bound, and a visited-path
+      array the recursion refuses to revisit. Neither can fail today because
+      the generator builds a strict hierarchy; they exist because trusting the
+      generator is what a planted defect would break.
+    columns:
+      - name: bom_path_key
+        description: Surrogate key over (top material, component, path).
+        data_tests: [unique, not_null]
+      - name: top_material_number
+        data_tests: [not_null]
+      - name: component_material_number
+        data_tests: [not_null]
+      - name: total_quantity_per
+        description: Quantities multiplied along this path.
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: exploded_quantity_is_positive
+              arguments:
+                expression: "> 0"
+      - name: bom_level
+        description: Levels traversed. 1 is a direct child.
+        data_tests: [not_null]
+      - name: is_leaf
+        description: True when the component has no BOM of its own -- a bought part.
+        data_tests: [not_null]
+
+  - name: int_component_requirements
+    description: >
+      GRAIN: one row per (top-level material, leaf component).
+
+      Total quantity of each bought part needed to build one top-level
+      material, summed across every path that reaches it.
+
+      Only leaves are counted. Including sub-assemblies would double-count: a
+      rack needs 3 trays AND the 21 GPUs inside them, so summing both would
+      claim 24 items of which 3 are containers for the other 21.
+    columns:
+      - name: component_requirement_key
+        data_tests: [unique, not_null]
+      - name: top_material_number
+        data_tests: [not_null]
+      - name: component_material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_material_current')
+                field: material_number
+      - name: quantity_required
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: required_quantity_is_positive
+              arguments:
+                expression: "> 0"
+      - name: path_count
+        description: How many distinct BOM paths reach this component.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [top_material_number, component_material_number]

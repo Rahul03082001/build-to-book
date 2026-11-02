@@ -174,6 +174,40 @@ SCHEMAS: dict[str, DataFrameSchema] = {
         coerce=True,
         name="standard_costs",
     ),
+    "bom_headers": DataFrameSchema(
+        {
+            "bom_number": _code(),
+            "material_number": _code(),
+            "plant": _code(),
+            "bom_usage": _code(),
+            # A base quantity of zero would make every exploded requirement
+            # either zero or a division error downstream.
+            "base_quantity": _positive_int(),
+            "uom": _code(),
+            "valid_from": _date(),
+            "valid_to": _date(),
+            "status": _code(),
+            "created_by": _code(),
+        },
+        strict=True,
+        coerce=True,
+        name="bom_headers",
+    ),
+    "bom_items": DataFrameSchema(
+        {
+            "bom_number": _code(),
+            "bom_item": _positive_int(),
+            "component_material_number": _code(),
+            # Zero would mean a component that is listed but not required,
+            # which is a data fault rather than a design choice.
+            "quantity_per": _positive_int(),
+            "uom": _code(),
+            "is_phantom": Column(bool, coerce=True),
+        },
+        strict=True,
+        coerce=True,
+        name="bom_items",
+    ),
     "purchase_order_headers": DataFrameSchema(
         {
             "po_number": _code(),
@@ -290,6 +324,8 @@ NATURAL_KEYS: dict[str, tuple[str, ...]] = {
     "materials": ("material_number",),
     "suppliers": ("supplier_number",),
     "standard_costs": ("material_number", "valid_from"),
+    "bom_headers": ("bom_number",),
+    "bom_items": ("bom_number", "bom_item"),
     "purchase_order_headers": ("po_number",),
     "purchase_order_lines": ("po_number", "po_item"),
     # Material document numbers repeat across fiscal years (ADR-020).

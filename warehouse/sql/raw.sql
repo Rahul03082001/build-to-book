@@ -66,6 +66,47 @@ CREATE TABLE IF NOT EXISTS raw.standard_costs (
 CREATE UNIQUE INDEX IF NOT EXISTS standard_costs_nk
     ON raw.standard_costs (material_number, valid_from);
 
+-- BOM header and item, shaped on SAP's STKO and STPO (ADR-002). Multi-level
+-- structure is emergent: a component that is itself a parent has its own
+-- header, so depth comes from the data rather than from a level column that
+-- someone has to keep correct.
+CREATE TABLE IF NOT EXISTS raw.bom_headers (
+    bom_number       text        NOT NULL,
+    material_number  text        NOT NULL,
+    plant            text        NOT NULL,
+    bom_usage        text        NOT NULL,
+    base_quantity    integer     NOT NULL,
+    uom              text        NOT NULL,
+    valid_from       date        NOT NULL,
+    valid_to         date        NOT NULL,
+    status           text        NOT NULL,
+    created_by       text        NOT NULL,
+    _batch_id        text        NOT NULL,
+    _source_file     text        NOT NULL,
+    _file_sha256     char(64)    NOT NULL,
+    _loaded_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS bom_headers_nk ON raw.bom_headers (bom_number);
+CREATE INDEX IF NOT EXISTS bom_headers_material_idx ON raw.bom_headers (material_number);
+
+CREATE TABLE IF NOT EXISTS raw.bom_items (
+    bom_number                 text        NOT NULL,
+    bom_item                   integer     NOT NULL,
+    component_material_number  text        NOT NULL,
+    -- Quantity of the component per base quantity of the parent. Not money,
+    -- so no value total in the sidecar.
+    quantity_per               integer     NOT NULL,
+    uom                        text        NOT NULL,
+    is_phantom                 boolean     NOT NULL,
+    _batch_id                  text        NOT NULL,
+    _source_file               text        NOT NULL,
+    _file_sha256               char(64)    NOT NULL,
+    _loaded_at                 timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS bom_items_nk ON raw.bom_items (bom_number, bom_item);
+CREATE INDEX IF NOT EXISTS bom_items_component_idx
+    ON raw.bom_items (component_material_number);
+
 CREATE TABLE IF NOT EXISTS raw.purchase_order_headers (
     po_number        text    NOT NULL,
     supplier_number  text    NOT NULL,

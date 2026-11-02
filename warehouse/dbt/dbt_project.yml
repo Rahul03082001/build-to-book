@@ -15,6 +15,13 @@ clean-targets: ["target", "dbt_packages"]
 
 # Fail rather than guess. A model that references a column that no longer
 # exists should break the build, not silently produce nulls.
+vars:
+  # Bounds the BOM explosion's recursion. A cyclic extract then fails fast with
+  # visibly truncated output rather than hanging a nightly run. Set well above
+  # the real depth (rack -> tray -> component is 2) so a legitimate deepening
+  # of the product structure does not silently lose levels.
+  max_bom_depth: 10
+
 flags:
   send_anonymous_usage_stats: false
   require_explicit_package_overrides_for_builtin_materializations: true

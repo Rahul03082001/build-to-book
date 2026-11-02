@@ -18,7 +18,7 @@ import pandas as pd
 import pandera.errors as pa_errors
 import pytest
 
-from generator import inventory
+from generator import dataset
 from ingestion import loader, schemas
 
 
@@ -26,7 +26,14 @@ from ingestion import loader, schemas
 # Schemas and natural keys (BTB-14)
 # ---------------------------------------------------------------------------
 def test_every_extract_has_a_declared_schema() -> None:
-    assert set(schemas.SCHEMAS) == set(inventory.EXTRACT_SPECS)
+    """Compared against the whole dataset, not the inventory slice.
+
+    This test used to compare against ``inventory.EXTRACT_SPECS``, which
+    passed while Phase 1 had one source system and became wrong the moment
+    Phase 2 added BOMs -- it then failed for the right reason but with a
+    confusing message.
+    """
+    assert set(schemas.SCHEMAS) == set(dataset.EXTRACT_SPECS)
 
 
 def test_every_extract_has_a_declared_natural_key() -> None:
@@ -46,12 +53,12 @@ def test_natural_keys_match_the_generator_specs() -> None:
     claim, this is the loader's expectation -- but if they diverge the
     anti-join is keyed on the wrong thing and idempotency is a coin flip.
     """
-    for name, spec in inventory.EXTRACT_SPECS.items():
+    for name, spec in dataset.EXTRACT_SPECS.items():
         assert tuple(spec.natural_key) == schemas.natural_key_for(name), name
 
 
 def test_schema_columns_match_the_generator_columns() -> None:
-    for name, spec in inventory.EXTRACT_SPECS.items():
+    for name, spec in dataset.EXTRACT_SPECS.items():
         assert set(schemas.SCHEMAS[name].columns) == set(spec.columns), name
 
 

@@ -58,6 +58,77 @@ models:
           arguments:
             combination_of_columns: [material_number, valid_from]
 
+  - name: stg_bom_headers
+    description: >
+      GRAIN: one row per BOM. Shaped on SAP's STKO. `is_released` and
+      `is_current` are derived once here so no consumer has to remember that
+      an unreleased or expired BOM must not drive component requirements.
+    columns:
+      - name: bom_number
+        data_tests: [unique, not_null]
+      - name: parent_material_number
+        description: The material this BOM builds.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_materials')
+                field: material_number
+      - name: base_quantity
+        description: Quantity of the parent this BOM's quantities are stated per.
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: bom_base_quantity_is_positive
+              arguments:
+                expression: "> 0"
+      - name: is_released
+        data_tests: [not_null]
+
+  - name: stg_bom_items
+    description: >
+      GRAIN: one row per BOM line -- a single parent-child edge. Shaped on
+      SAP's STPO. Nothing here resolves the hierarchy; int_bom_exploded does,
+      in reviewable SQL (ADR-025).
+    columns:
+      - name: bom_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_bom_headers')
+                field: bom_number
+      - name: component_material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_materials')
+                field: material_number
+      - name: quantity_per
+        description: Component quantity per base quantity of the parent.
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: bom_component_quantity_is_positive
+              arguments:
+                expression: "> 0"
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [bom_number, bom_item]
+      # A material cannot be a component of its own BOM. The deeper cycle case
+      # needs the recursive walk in assert_bom_has_no_cycles; this catches the
+      # one-level case at the column level, where the message is clearer.
+      - dbt_utils.expression_is_true:
+          name: component_is_not_its_own_parent
+          arguments:
+            expression: >
+              component_material_number <> (
+                select parent_material_number from {{ ref('stg_bom_headers') }} as h
+                where h.bom_number = stg_bom_items.bom_number
+              )
+
   - name: stg_purchase_order_headers
     description: "GRAIN: one row per purchase order."
     columns:

@@ -16,7 +16,8 @@ import pathlib
 import sys
 
 from generator import config as genconfig
-from generator import defects, inventory, writers
+from generator import dataset as dataset_module
+from generator import defects, writers
 
 BANNER = "SYNTHETIC DATA -- simulated, SOX-style controls. Not SOX compliant."
 
@@ -89,22 +90,20 @@ def main(argv: list[str] | None = None) -> int:
     print(f"defects enabled: {', '.join(enabled) if enabled else 'none (clean run)'}")
     print()
 
-    generator = inventory.InventoryGenerator(cfg, args.profile)
-    data = generator.generate()
+    data, planted = dataset_module.build(cfg, args.profile, enabled)
 
     manifest = defects.DefectManifest(
         seed=cfg.seed, profile=args.profile, generated_at=generated_at
     )
-    if enabled:
-        for record in generator.inject_defects(data, enabled):
-            manifest.add(record)
+    for record in planted:
+        manifest.add(record)
 
     print(f"{'extract':28}{'rows':>8}  {'value total':>20}  sha256")
     print("-" * 86)
     written: list[writers.WrittenExtract] = []
     for name, rows in data.as_mapping().items():
         result = writers.write_extract(
-            spec=inventory.EXTRACT_SPECS[name],
+            spec=dataset_module.EXTRACT_SPECS[name],
             rows=rows,
             out_dir=out_dir,
             generated_at=generated_at,
