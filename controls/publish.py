@@ -280,7 +280,13 @@ def publish(
     publish_id = uuid.uuid4()
     candidate_version = version_suffix(started, publish_id)
 
-    with conn.cursor() as cursor:
+    # Wrapped in a transaction even though it only reads. On a connection with
+    # autocommit off, a bare cursor read opens a transaction that nothing ever
+    # commits, and psycopg then nests every later `conn.transaction()` as a
+    # savepoint inside it -- so the read's ACCESS SHARE locks are held until
+    # the connection closes. A dbt run in the same test session blocked on
+    # exactly that: `idle in transaction` here, `wait_event_type = Lock` there.
+    with conn.transaction(), conn.cursor() as cursor:
         previous_version = _currently_served_version(cursor, target_schema, marts[0])
 
     def finish(status: str, published_version: str | None, reason: str | None) -> PublishResult:

@@ -15,6 +15,7 @@ select
     signed_amount_usd,
     posting_date,
     document_date,
+    entered_on,
     posting_period,
     -- Links back to the material document or revaluation document that caused
     -- the posting -- the join CTRL-003 relies on.

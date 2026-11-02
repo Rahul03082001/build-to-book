@@ -260,6 +260,11 @@ SCHEMAS: dict[str, DataFrameSchema] = {
             "currency": _code(["USD"]),
             "posting_date": _date(),
             "document_date": _date(),
+            # When the document was entered, as distinct from the period it
+            # posts to. CTRL-006 compares this against the period close date;
+            # without it a backdated posting is indistinguishable from a
+            # normal one.
+            "entered_on": _date(),
             "reference_document": _code(),
             # Null on the offset line.
             "material_number": _text(nullable=True),

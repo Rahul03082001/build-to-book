@@ -1297,6 +1297,28 @@ too.
 - Jira: BTB-15 | PR/commit: BTB-9-phase-1-decisions
 - Area: Data
 
+> **Amendment 2026-11-02, found while planting defects (BTB-27).** The
+> decision below stands, but it has a consequence worth stating plainly:
+> **insert-only loading cannot see a changed value on a row already in `raw`.**
+> The anti-join matches on the natural key, so a row whose key exists is
+> skipped regardless of whether its other columns changed.
+>
+> This surfaced because the first backdated-posting injector edited
+> `entered_on` on an existing document. Four records were planted and **zero**
+> reached the warehouse -- the loader skipped them all, and the control that
+> was supposed to catch them had nothing to find. The injector was wrong, not
+> the loader: a backdated entry in a real system is a *new* document carrying
+> an old posting date, so it is now modelled as an insert and is detected.
+>
+> The limitation is real nonetheless. A source that **corrects** a previously
+> sent row -- a price amended, a quantity restated -- would be silently
+> ignored. Handling it needs either a change-data-capture signal from the
+> source or a reconciliation that compares values, not just keys, for rows
+> whose key already exists. Neither is built. The extracts are append-only by
+> construction, so nothing in this project depends on it today, and recording
+> the gap is better than discovering it when a real source starts sending
+> corrections.
+
 ### Context
 
 [ADR-017](#adr-017-incremental-idempotent-loading-keyed-on-source-and-batch-ids)

@@ -16,7 +16,7 @@ import pathlib
 import sys
 
 from generator import config as genconfig
-from generator import inventory, writers
+from generator import defects, inventory, writers
 
 BANNER = "SYNTHETIC DATA -- simulated, SOX-style controls. Not SOX compliant."
 
@@ -39,6 +39,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory. Defaults to the generator config's output.directory.",
     )
     parser.add_argument(
+        "--defect",
+        action="append",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Plant this defect. Repeatable. Overrides the switches in "
+            "config.yaml, which all default to off. Use `all` for every "
+            "implemented defect."
+        ),
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -58,7 +69,20 @@ def main(argv: list[str] | None = None) -> int:
     # One timestamp for the whole run, so every sidecar agrees.
     generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0, tzinfo=None)
 
-    enabled = cfg.enabled_defects()
+    from generator import defects as defect_registry
+
+    if args.defect:
+        requested = sorted(defect_registry.INJECTORS) if "all" in args.defect else list(args.defect)
+    else:
+        requested = cfg.enabled_defects()
+
+    unknown = [key for key in requested if key not in defect_registry.REGISTRY]
+    if unknown:
+        print(f"Unknown defect(s): {', '.join(unknown)}", file=sys.stderr)
+        print(f"Known: {', '.join(sorted(defect_registry.REGISTRY))}", file=sys.stderr)
+        return 2
+
+    enabled = requested
 
     print(BANNER)
     print(f"profile={args.profile}  seed={cfg.seed}  out={out_dir}")
@@ -67,6 +91,13 @@ def main(argv: list[str] | None = None) -> int:
 
     generator = inventory.InventoryGenerator(cfg, args.profile)
     data = generator.generate()
+
+    manifest = defects.DefectManifest(
+        seed=cfg.seed, profile=args.profile, generated_at=generated_at
+    )
+    if enabled:
+        for record in generator.inject_defects(data, enabled):
+            manifest.add(record)
 
     print(f"{'extract':28}{'rows':>8}  {'value total':>20}  sha256")
     print("-" * 86)
@@ -85,7 +116,18 @@ def main(argv: list[str] | None = None) -> int:
     print("-" * 86)
     print(f"{'total':28}{sum(w.row_count for w in written):>8}")
     print()
+
+    manifest_path = out_dir / cfg.output["manifest_filename"]
+    manifest.write(manifest_path)
     print(f"Wrote {len(written)} extracts and {len(written)} control-totals sidecars to {out_dir}")
+
+    if enabled:
+        print()
+        print(f"PLANTED {manifest.total_injected} record(s) across {len(enabled)} defect(s):")
+        for key, count in sorted(manifest.to_dict()["counts_by_defect"].items()):
+            print(f"  {key:36} {count:>5} record(s)")
+        print(f"Manifest: {manifest_path}")
+        print("Controls are expected to detect these. A clean run plants nothing.")
     return 0
 
 

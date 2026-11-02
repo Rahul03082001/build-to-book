@@ -29,6 +29,7 @@ from controls.checks import (
     Check,
     CheckShape,
 )
+from generator import config as genconfig
 
 __all__ = [
     "ALLOWED_TARGET_SCHEMAS",
@@ -56,6 +57,20 @@ ALLOWED_TARGET_SCHEMAS = frozenset({"publish_candidate", "reporting", "sandbox",
 
 class UnknownTargetSchemaError(ValueError):
     """Raised when a check is pointed at a schema outside the allowlist."""
+
+
+def _parameters(batch_id: str) -> dict[str, object]:
+    """Bindings available to every check.
+
+    `close_lag_days` comes from the generator config rather than being
+    hardcoded in the control, so the control and the data cannot disagree
+    about when a period locks -- which would make CTRL-006 either blind or
+    permanently failing.
+    """
+    return {
+        "batch_id": batch_id,
+        "close_lag_days": int(genconfig.load().close_calendar["close_lag_days"]),
+    }
 
 
 @dataclasses.dataclass
@@ -128,7 +143,7 @@ def _run_comparison(
     started: dt.datetime,
 ) -> list[CheckResult]:
     """Run a two-figures-must-agree check, one result per period."""
-    cursor.execute(check.sql.format(schema=schema), {"batch_id": batch_id})
+    cursor.execute(check.sql.format(schema=schema), _parameters(batch_id))
     rows = cursor.fetchall()
 
     results: list[CheckResult] = []
@@ -189,7 +204,7 @@ def _run_exception(
     started: dt.datetime,
 ) -> list[CheckResult]:
     """Run a these-rows-should-not-exist check. One result, with a sample."""
-    cursor.execute(check.sql.format(schema=schema), {"batch_id": batch_id})
+    cursor.execute(check.sql.format(schema=schema), _parameters(batch_id))
     rows = cursor.fetchall()
     count = len(rows)
     now = dt.datetime.now(dt.UTC)

@@ -143,14 +143,24 @@ def test_the_independent_invariant_is_a_separate_check() -> None:
     )
 
 
-def test_closed_period_control_is_absent_with_a_reason() -> None:
-    """CTRL-006 is deliberately not implemented yet.
+def test_closed_period_control_is_implemented() -> None:
+    """CTRL-006 arrived with BTB-27, once the generator emitted `entered_on`.
 
-    Detecting a posting made *into* a closed period needs an entry timestamp
-    distinct from the posting date, which the generator does not emit. A check
-    that cannot tell a backdated entry from a normal one would be worse than
-    none, so it lands with the defect that exercises it (BTB-27).
+    This test replaces one that asserted the control was *absent*, with the
+    reason recorded in the code. That earlier test was not wasted: it pinned a
+    deliberate omission so it could not be forgotten, and it failed the moment
+    the omission was filled -- which is what told me to update it.
     """
-    assert "CTRL-006" not in {c.check_id for c in checks.PHASE_1_CHECKS}
-    source = pathlib.Path(checks.__file__).read_text()
-    assert "CTRL-006" in source, "the omission must be documented where someone will look"
+    from controls import checks as check_module
+
+    assert "CTRL-006" in {c.check_id for c in checks.PHASE_1_CHECKS}
+    control = check_module.CLOSED_PERIOD_INTEGRITY
+    assert control.severity == checks.SEVERITY_CRITICAL, (
+        "a backdated posting restates reported figures, so detecting it after "
+        "publishing is too late -- it has to block"
+    )
+    # The close lag must come from configuration, not be hardcoded in the SQL:
+    # the control and the generator cannot be allowed to disagree about when a
+    # period locks.
+    assert "%(close_lag_days)s" in control.sql
+    assert "entered_on" in control.sql

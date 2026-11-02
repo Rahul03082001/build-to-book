@@ -16,14 +16,14 @@ from __future__ import annotations
 import datetime as dt
 import decimal
 import uuid
-from collections.abc import Iterator
 
+import conftest
 import psycopg
 import pytest
 
 from controls import publish as publish_module
 from controls import runner
-from ingestion import db, loader
+from ingestion import loader
 
 pytestmark = pytest.mark.integration
 
@@ -31,47 +31,20 @@ D = decimal.Decimal
 
 
 @pytest.fixture(scope="module")
-def conn() -> Iterator[psycopg.Connection]:
-    try:
-        connection = db.connect()
-    except psycopg.OperationalError as error:
-        pytest.skip(f"warehouse unavailable: {error}")
-    with connection:
-        yield connection
-
-
-@pytest.fixture(scope="module", autouse=True)
-def require_built_marts(conn: psycopg.Connection) -> None:
-    """Skip, rather than fail obscurely, when the marts have not been built.
-
-    CI ran pytest before `make build` and these tests failed with
-    `UndefinedTable` five times over. A skip says what to do instead.
-    """
-    missing = []
-    with conn.cursor() as cursor:
-        for mart in (*publish_module.PUBLISHED_MARTS, "fct_gl_postings"):
-            cursor.execute(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_schema = %s AND table_name = %s",
-                (publish_module.BUILD_SCHEMA, mart),
-            )
-            if cursor.fetchone() is None:
-                missing.append(f"{publish_module.BUILD_SCHEMA}.{mart}")
-    if missing:
-        pytest.skip(f"run `make build` first; missing {', '.join(missing)}")
+def conn(warehouse: psycopg.Connection) -> psycopg.Connection:
+    return warehouse
 
 
 @pytest.fixture(scope="module")
 def batch_id(conn: psycopg.Connection) -> str:
-    with conn.cursor() as cursor:
-        cursor.execute(
-            "SELECT batch_id FROM audit.pipeline_runs WHERE status = 'success' "
-            "ORDER BY started_at DESC LIMIT 1"
-        )
-        row = cursor.fetchone()
-    if row is None:
-        pytest.skip("no successful load; run `make load` first")
-    return row[0]
+    """A known-clean batch this module loaded and built itself.
+
+    Deliberately not "the most recent successful load". The module that runs
+    just before this one ends with a load containing deliberately rejected
+    rows, so inheriting the latest batch made CTRL-001 fail here on another
+    module's fixture -- passing in isolation and failing in a full run.
+    """
+    return conftest.establish_clean_warehouse(conn)
 
 
 def _served_version(conn: psycopg.Connection, mart: str = "mart_inventory_balance") -> str | None:

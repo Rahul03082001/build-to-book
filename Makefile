@@ -104,7 +104,12 @@ init: up schemas ## Start the warehouse, then apply roles and schemas
 # ---------------------------------------------------------------------------
 .PHONY: data
 data: ## Generate synthetic source extracts + control totals
-	$(PY) -m generator --profile $(PROFILE) --seed $(SEED)
+	$(PY) -m generator --profile $(PROFILE) --seed $(SEED) \
+		$(foreach d,$(DEFECTS),--defect $(d))
+
+.PHONY: data-defects
+data-defects: ## Generate extracts with every implemented defect planted
+	$(PY) -m generator --profile $(PROFILE) --seed $(SEED) --defect all
 
 .PHONY: load
 load: ## Validate and incrementally load extracts into raw
