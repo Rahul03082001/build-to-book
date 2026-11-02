@@ -1,0 +1,388 @@
+Issue Type,Issue Key,Summary,Description,Epic Name,Epic Link,Labels,Priority,Story Points
+Epic,BTB-1,Phase 0: Foundations and governance,"Repository skeleton, decision log, backlog, CI, and the warehouse roles. Nothing is generated or loaded yet; this phase makes every later phase reviewable.",Phase 0 Foundations,,,High,
+Story,BTB-2,"Create the repository skeleton, Makefile, and docker-compose","Acceptance criteria:
+* Directory layout matches the agreed structure (generator, ingestion, warehouse, controls, lineage, app, exports, dashboards, evidence, tests, docs).
+* `docker compose up -d --wait` starts PostgreSQL 16 and the healthcheck passes.
+* All nine schemas exist: raw, staging, intermediate, marts, publish_candidate, reporting, sandbox, audit, evidence.
+* `make help` lists every target; unbuilt targets exit non-zero naming the phase that builds them.
+* `make venv` creates a Python 3.11 environment and installs the project.",,BTB-1,"phase-0,tooling",High,5
+Story,BTB-3,Write the decision log with ADR-001 to ADR-019,"Acceptance criteria:
+* docs/DECISIONS.md holds 19 entries using the agreed template.
+* Each entry has Context, Options considered (2-3 with trade-offs), Decision, Reasons, Consequences, and How a reviewer can verify it.
+* An index table at the top lists ID, date, title, and status.
+* The first paragraph of each entry is readable by a finance manager or auditor.
+* ADR-011 lists the compensating controls for segregation of duties.
+* ADR-015 records each provider's free-tier limits with the date they were checked.
+* A test asserts entries are numbered contiguously and every index row has a matching section.",,BTB-1,"phase-0,docs,governance",High,8
+Story,BTB-4,Write a Jira-importable backlog with acceptance criteria,"Acceptance criteria:
+* backlog/jira_backlog.csv imports into Jira with no manual column mapping.
+* One epic per phase; every story links to its epic.
+* Every story carries acceptance criteria in its description.
+* A test asserts the CSV parses, keys are unique, and every Epic Link resolves to an epic in the file.",,BTB-1,"phase-0,governance",High,3
+Story,BTB-5,Add pre-commit hooks and a CI workflow that lints and tests,"Acceptance criteria:
+* pre-commit runs ruff (lint + format) and sqlfluff on staged files.
+* `make lint` and `make test` pass locally.
+* ci.yml runs lint and tests on every pull request against Python 3.11.
+* CI fails when the PR title does not contain a Jira key matching BTB-<number>.
+* CI finishes in under five minutes on the demo profile.",,BTB-1,"phase-0,ci",High,5
+Story,BTB-6,Document branch protection and the PR self-review checklist,"Acceptance criteria:
+* docs/branch_protection.md gives click-by-click steps to protect main.
+* Required status checks are named explicitly.
+* Direct pushes to main are blocked and a linear history is required.
+* A PR self-review checklist is included and referenced from the PR template.
+* The document states that a second approver is the missing control and how it would be added in production (ADR-011).",,BTB-1,"phase-0,governance,controls",High,3
+Story,BTB-7,Create warehouse schemas and least-privilege roles,"Acceptance criteria:
+* warehouse/sql/roles.sql creates loader, transformer, reporter, and auditor roles.
+* loader writes raw only and may INSERT but not UPDATE or DELETE on audit.
+* transformer reads raw and writes the build schemas.
+* reporter reads reporting only.
+* auditor reads audit and evidence only.
+* Default PUBLIC privileges are revoked on the database and the public schema.
+* `make roles` is idempotent: running it twice leaves the same grants and errors on neither run.",,BTB-1,"phase-0,controls,security",High,5
+Story,BTB-8,Write the project overview and README,"Acceptance criteria:
+* PROJECT_OVERVIEW.md explains the problem, who has it, and what the project does about it, without jargon.
+* README states plainly that data is synthetic and controls are simulated, SOX-style (ADR-019).
+* README has a placeholder block for the four live demo links, filled in Phase 1.
+* Every number in the README names the command that reproduces it.
+* Repository layout and quickstart are documented and verified on a clean checkout.",,BTB-1,"phase-0,docs",High,3
+Epic,BTB-9,"Phase 1: Inventory slice, live from day one","One thin path end to end on a public URL: inventory generation, ingestion, dbt models, one reconciliation, the publish gate, and one live dashboard page.",Phase 1 Inventory Slice,,,High,
+Story,BTB-10,"Generate inventory master data: materials, suppliers, standard costs","Acceptance criteria:
+* Deterministic for a given seed: two runs produce byte-identical files.
+* Material numbers, groups, and units of measure follow the configured domain.
+* Standard costs are per material and effective-dated.
+* The demo profile produces the configured volumes.
+* Designed so Phase 2 extends it without a rewrite.",,BTB-9,"phase-1,generator",High,5
+Story,BTB-11,"Generate purchase orders, goods receipts, and goods issues","Acceptance criteria:
+* PO header and line structure follows SAP-style shapes (ADR-002).
+* Every goods receipt references a real PO line.
+* Goods issues never exceed available quantity when defects are off.
+* Movement types distinguish receipts from issues.
+* Document numbers are unique within a year.",,BTB-9,"phase-1,generator",High,8
+Story,BTB-12,Generate GL inventory postings from goods movements,"Acceptance criteria:
+* Every goods movement produces a GL posting at standard cost.
+* Postings carry both posting date and document date.
+* With defects off, the inventory subledger total equals the GL inventory account balance per period.
+* Postings are USD only, as documented in metric_definitions.md.",,BTB-9,"phase-1,generator,finance",High,5
+Story,BTB-13,Write a control-totals trailer file beside every extract,"Acceptance criteria:
+* Each extract has a sidecar file with row count and value total.
+* The trailer is generated from the data, not asserted independently.
+* Format is documented and stable for Phase 2 extracts.
+* A test asserts the trailer matches the extract it accompanies.",,BTB-9,"phase-1,generator,controls",High,3
+Story,BTB-14,Declare per-extract schemas and validate with pandera,"Acceptance criteria:
+* Each extract has a declared schema: column names, dtypes, nullability, and value ranges.
+* Validation returns the failing rows rather than only a boolean.
+* A schema change that breaks an extract fails a test.
+* Each extract's natural key is declared alongside its schema (ADR-017).",,BTB-9,"phase-1,ingestion",High,5
+Story,BTB-15,"Build the incremental, idempotent loader","Acceptance criteria:
+* Loading is keyed on each extract's declared natural source ID.
+* Running the loader twice in a row adds zero rows the second time.
+* A duplicate within a source extract is distinguished from an already-loaded row.
+* Loads are chunked so the full profile does not exhaust memory.
+* A failed load leaves raw in a consistent state.",,BTB-9,"phase-1,ingestion",Highest,8
+Story,BTB-16,Stamp batch provenance on every landed row,"Acceptance criteria:
+* Every raw row carries _batch_id, _source_file, _file_sha256, and _loaded_at.
+* The file hash is computed from file bytes before parsing.
+* Batch IDs are unique per run and sortable by time.
+* Provenance columns survive into staging and mart models.",,BTB-9,"phase-1,ingestion,lineage",High,3
+Story,BTB-17,Log rejected rows with a reason instead of dropping them,"Acceptance criteria:
+* Invalid rows are written to a rejects table with the failing rule and the raw row.
+* Rejected row counts appear in the audit record for that file.
+* A file whose rejects exceed a configured threshold fails the run.
+* No row is ever silently discarded.",,BTB-9,"phase-1,ingestion,controls",High,5
+Story,BTB-18,Create the append-only audit.pipeline_runs table,"Acceptance criteria:
+* One row per file per run: run ID, batch ID, git commit SHA, file hash, rows in file, rows loaded, rows rejected, start and end time, status, and the role that ran it.
+* UPDATE and DELETE are revoked from every role.
+* A trigger raises an exception on any UPDATE or DELETE attempt.
+* Tests prove both the revoke and the trigger block a modification attempt.
+* A reviewer can join a reported number to the file checksum that produced it in one query.",,BTB-9,"phase-1,controls,audit",Highest,8
+Story,BTB-19,Build staging models for the inventory extracts,"Acceptance criteria:
+* One stg_ model per raw table, with no joins.
+* Columns renamed to business names and cast to explicit types.
+* Units of measure standardised.
+* Deduplication rules are explicit and documented.
+* Source IDs and batch IDs are preserved on every row.",,BTB-9,"phase-1,dbt",High,5
+Story,BTB-20,Build fct_goods_movements,"Acceptance criteria:
+* Grain is one row per material document line, declared at the top of its YAML.
+* Movement type determines the sign of the quantity.
+* Keys are unique and not null, enforced by dbt tests.
+* Relationships to material and supplier dimensions are tested.
+* Every column is described in YAML.",,BTB-9,"phase-1,dbt",High,5
+Story,BTB-21,Build the inventory balance mart,"Acceptance criteria:
+* Inventory value by material group and period, valued at standard cost.
+* A custom dbt test asserts no negative on-hand balance.
+* Grain is declared and tested.
+* The model carries meta certified: true and owner Finance.",,BTB-9,"phase-1,dbt,metrics",High,5
+Story,BTB-22,Reconcile inventory subledger to the GL inventory account,"Acceptance criteria:
+* Compares inventory value from goods movements against the GL inventory account balance, per period.
+* Writes run ID, check ID, expected, actual, difference, tolerance, and pass/fail to audit.reconciliation_results.
+* Assumptions are documented in metric_definitions.md: posting date rather than document date, USD only, valuation at standard cost.
+* Classified critical, so a failure blocks publishing (ADR-010).
+* With defects off, the check passes with a zero difference.",,BTB-9,"phase-1,controls,reconciliation",Highest,8
+Story,BTB-23,Build the publish gate,"Acceptance criteria:
+* Models build into publish_candidate, never directly into reporting.
+* Critical checks run before any swap.
+* On success, the candidate is swapped into reporting atomically.
+* On failure, reporting keeps the last good dataset and audit.publish_log records the reason.
+* The swap takes a lock with a timeout and records a failed publish rather than waiting indefinitely.
+* A forced failure leaves the dashboard showing its previous refresh time.",,BTB-9,"phase-1,controls,publish",Highest,8
+Story,BTB-24,Deploy the first Streamlit trust console page live,"Acceptance criteria:
+* Shows inventory value by material group, the last successful refresh time, and open data-quality issues.
+* Connects to the hosted database through the read-only reporter role only.
+* The live URL opens on a phone.
+* A header states the data is synthetic and the controls are simulated.
+* The hosted free-tier limits recorded in ADR-015 are re-verified before deploying.",,BTB-9,"phase-1,app,deploy",Highest,8
+Story,BTB-25,Schedule the nightly pipeline against the hosted database,"Acceptance criteria:
+* pipeline.yml runs nightly on a cron schedule.
+* Credentials come from repository secrets and never appear in logs.
+* A failed run blocks the publish and leaves reporting untouched.
+* Run outcome is visible in the trust console the next morning.
+* The workflow can also be dispatched manually.",,BTB-9,"phase-1,ci,deploy",High,5
+Story,BTB-26,Plant and detect a duplicate goods receipt,"Acceptance criteria:
+* The defect is injected behind its own config switch.
+* The injected records are listed in defects_manifest.json.
+* The completeness control detects it and the run fails.
+* Publishing is blocked and reporting still holds the previous dataset.
+* A test asserts the control caught exactly the planted records.",,BTB-9,"phase-1,controls,defects",Highest,5
+Story,BTB-27,Plant and detect a backdated GL posting,"Acceptance criteria:
+* The defect is injected behind its own config switch.
+* The closed-period control detects a posting dated into a closed period.
+* Publishing is blocked and the reason is recorded in audit.publish_log.
+* A test asserts detection matches the manifest exactly.",,BTB-9,"phase-1,controls,defects",Highest,5
+Story,BTB-28,"Test idempotency, the append-only audit table, and role permissions","Acceptance criteria:
+* Two consecutive loader runs add zero rows on the second.
+* UPDATE and DELETE on audit.pipeline_runs are refused for every role.
+* loader cannot read reporting; reporter cannot read raw or sandbox; auditor cannot read business data.
+* Each role's allowed actions are also asserted, not just the denied ones.
+* Tests run in CI against a freshly generated dataset.",,BTB-9,"phase-1,tests,controls",Highest,8
+Epic,BTB-29,Phase 2: All sources and planted defects,"Widen the slice to every source system at realistic volume, with all 13 defects behind individual switches and a manifest of every injected record.",Phase 2 Sources and Defects,,,High,
+Story,BTB-30,Generate multi-level bills of materials for the rack configurations,"Acceptance criteria:
+* 4 to 6 rack configurations built from GPU, CPU, DIMM, NVMe, PSU, NIC, and chassis components.
+* BOMs are multi-level and acyclic.
+* Component quantities per configuration are consistent across runs for a given seed.
+* A test asserts no BOM cycles and no orphan components.",,BTB-29,"phase-2,generator",Medium,8
+Story,BTB-31,Generate supplier invoices,"Acceptance criteria:
+* Invoices reference PO lines and goods receipts.
+* Prices agree with the PO within tolerance when defects are off.
+* Invoice dates follow receipt dates.
+* Quantities and prices support the three-way match control.",,BTB-29,"phase-2,generator",Medium,5
+Story,BTB-32,"Generate production orders, component consumption, and confirmations","Acceptance criteria:
+* Consumption follows the BOM for the ordered configuration.
+* Confirmations reference production orders.
+* With defects off, confirmed quantities tie to MES final-test passes.
+* Order status values come from a declared set.",,BTB-29,"phase-2,generator",Medium,8
+Story,BTB-33,Generate unit-level MES events with rework loops,"Acceptance criteria:
+* One event per serial per step attempt, with station, step, timestamps, pass/fail, and failure code.
+* Serials traverse assembly, firmware flash, burn-in, and final test in order.
+* Rework loops are bounded by the configured maximum attempts.
+* Per-step failure rates match the configuration within sampling tolerance.
+* The full profile produces at least 5,000,000 events.",,BTB-29,"phase-2,generator,mes",Medium,13
+Story,BTB-34,Generate inbound shipments and advance ship notices,"Acceptance criteria:
+* Shipments carry promised and actual dates, carrier, and quantity shipped.
+* ASNs precede their receipts.
+* On-time delivery is computable from promised versus actual dates.
+* Supplier foreign keys are populated when defects are off.",,BTB-29,"phase-2,generator,supply-chain",Medium,5
+Story,BTB-35,"Generate the chart of accounts, journal entries, and monthly trial balance","Acceptance criteria:
+* Journal entries cover goods issues, production variances, and COGS.
+* The trial balance balances to zero per period.
+* The subledger ties to the GL when defects are off.
+* Account numbers and types come from a declared chart of accounts.",,BTB-29,"phase-2,generator,finance",Medium,8
+Story,BTB-36,Make the full profile run at target volume,"Acceptance criteria:
+* 12 months, 300 materials, 40 suppliers, 20,000 PO lines, 8,000 production orders, and 5,000,000+ MES events.
+* Generation completes on a laptop and the elapsed time is recorded.
+* The demo profile still fits the hosted storage cap.
+* Memory use stays bounded: generation and loading are chunked.",,BTB-29,"phase-2,generator,performance",Medium,8
+Story,BTB-37,Implement injectors for the remaining eleven defects,"Acceptance criteria:
+* Each of the 13 defects has its own config switch, defaulting to off.
+* Each injector records every injected record in the manifest.
+* Each defect declares the control expected to catch it and whether that control is preventive or detective.
+* With all defects off, the subledger equals the GL and every receipt matches a PO.",,BTB-29,"phase-2,generator,defects",High,13
+Story,BTB-38,Write defects_manifest.json and prove the generator is deterministic,"Acceptance criteria:
+* The manifest lists seed, profile, timestamp, per-defect counts, and every injected record's natural key.
+* With a fixed seed, two runs produce identical extracts and an identical manifest apart from the timestamp.
+* With each defect on, the manifest count matches the configured count exactly.
+* A test asserts the registry in code and the switches in config.yaml agree, so the two cannot drift.",,BTB-29,"phase-2,tests,defects",High,5
+Epic,BTB-39,Phase 3: Warehouse model in dbt,"`make build` turns raw data into a documented, tested star schema, with a performance tuning study on the full profile.",Phase 3 Warehouse Model,,,High,
+Story,BTB-40,Extend the staging layer to every source,"Acceptance criteria:
+* One stg_ model per raw table, with no joins.
+* Units of measure standardised across sources.
+* Deduplication rules explicit per model.
+* Every model and column described in YAML.",,BTB-39,"phase-3,dbt",Medium,8
+Story,BTB-41,Build the intermediate layer,"Acceptance criteria:
+* BOM explosion resolves multi-level BOMs to component requirements.
+* Receipt-to-PO matching produces a matched, unmatched, and out-of-tolerance classification.
+* Unit genealogy links MES events per serial across steps.
+* Running inventory balances are computed per material and period.
+* Each model's purpose is documented.",,BTB-39,"phase-3,dbt",Medium,13
+Story,BTB-42,Build the facts and dimensions,"Acceptance criteria:
+* Facts: fct_goods_movements, fct_purchase_order_lines, fct_production_orders, fct_unit_test_events (one row per serial per step attempt), fct_gl_postings.
+* Dimensions: dim_material (SCD Type 2), dim_supplier, dim_work_center, dim_date, dim_rack_configuration.
+* Every model declares its grain at the top of its YAML.
+* Unique, not-null, relationship, and accepted-values tests pass.
+* An as-of join to a Type 2 dimension does not multiply fact rows, asserted by a test.",,BTB-39,"phase-3,dbt,modeling",High,13
+Story,BTB-43,Add SCD Type 2 snapshots on material master and standard cost,"Acceptance criteria:
+* Snapshots capture valid_from and valid_to per version.
+* A cost change produces a new version rather than an overwrite.
+* Point-in-time valuation is reproducible for a past period.
+* The snapshot supports the cost-approval control in Phase 4.",,BTB-39,"phase-3,dbt,modeling",High,8
+Story,BTB-44,Build the KPI marts,"Acceptance criteria:
+* First-pass yield, WIP units and cycle time, inventory value and aging, purchase price variance, supplier on-time delivery, standard versus actual cost variance, and COGS.
+* Each KPI has a business definition in metric_definitions.md.
+* Each certified mart carries meta certified: true and an owner.
+* Each KPI has at least one dbt test asserting a business rule.",,BTB-39,"phase-3,dbt,metrics",High,13
+Story,BTB-45,Document every model and column so dbt docs is the data dictionary,"Acceptance criteria:
+* Every model has a description; every column has a description.
+* `dbt docs generate` produces no missing-description warnings.
+* Grain is stated for every fact and dimension.
+* A CI check fails when a new model or column lacks a description.",,BTB-39,"phase-3,dbt,docs",Medium,5
+Story,BTB-46,Run the performance tuning case study on the full profile,"Acceptance criteria:
+* The slowest mart query is identified and named.
+* EXPLAIN (ANALYZE, BUFFERS) output is recorded before any change.
+* At least two remedies are tried: indexing, partitioning by posting period, or an incremental model.
+* After numbers are recorded with the same method, on the same data and machine.
+* docs/tuning/ holds the write-up with the commands to reproduce it.
+* The chosen fix is logged as a new ADR.",,BTB-39,"phase-3,performance,docs",High,13
+Epic,BTB-47,Phase 4: SOX-style controls and reconciliations,"Every certified number is backed by automated checks and generated evidence, organised the way auditors test IT general controls. Simulated, SOX-style only.",Phase 4 Controls,,,High,
+Story,BTB-48,"Build the completeness, three-way match, MES-to-ERP, and closed-period controls","Acceptance criteria:
+* Source-to-raw completeness compares row counts and value totals per extract against the control-totals file.
+* Raw-to-mart completeness proves no rows lost or duplicated between layers, checked by key.
+* Three-way match agrees PO line, goods receipt, and supplier invoice on quantity and price within tolerance.
+* MES-to-ERP compares units passing final test against production order confirmations, per period.
+* Closed-period integrity finds any posting dated into a closed period.
+* Each writes expected, actual, difference, tolerance, and pass/fail to audit.reconciliation_results.",,BTB-47,"phase-4,controls,reconciliation",Highest,13
+Story,BTB-49,Control standard cost changes against approval records,"Acceptance criteria:
+* Every change in the standard cost snapshot is joined to an approval record.
+* A change with no approval fails the control.
+* The control catches the planted unapproved_standard_cost_change defect exactly.
+* Severity and tolerance are recorded in the control matrix.",,BTB-47,"phase-4,controls",High,8
+Story,BTB-50,Build the source freshness control,"Acceptance criteria:
+* Every extract has an expected refresh window declared in config.
+* A source older than its window fails the control.
+* A stale source blocks publishing of the metrics it feeds, not the whole dataset where that can be scoped.
+* The control catches the planted stale_extract defect.",,BTB-47,"phase-4,controls",High,8
+Story,BTB-51,Add change-management controls to CI,"Acceptance criteria:
+* CI runs lint, dbt build with tests, and the reconciliations against a freshly generated dataset on every PR.
+* A PR title without a Jira key fails CI.
+* CHANGELOG.md is generated from merged PRs.
+* An emergency-change path is documented: a hotfix branch with after-the-fact review within one business day.
+* The segregation-of-duties limitation is restated where the control is claimed (ADR-011).",,BTB-47,"phase-4,ci,governance",High,8
+Story,BTB-52,Generate a dated user access review report,"Acceptance criteria:
+* A script queries Postgres grants and role memberships.
+* Output is written to evidence/ with a date and is ready for a reviewer's sign-off.
+* The report lists each role, its members, and its object privileges.
+* An unexpected grant is visible by diffing against the previous report.",,BTB-47,"phase-4,controls,security",High,8
+Story,BTB-53,Generate IPE evidence packs for certified report runs,"Acceptance criteria:
+* evidence/<run_id>/ holds parameters, query text and its hash, source row counts, control totals, reconciliation results, git SHA, timestamp, and the role that ran it.
+* A pack is reproducible from the recorded run metadata.
+* A sample pack is committed for reviewers.
+* The pack demonstrates completeness and accuracy of report data, which is how auditors test information produced by the entity.",,BTB-47,"phase-4,controls,evidence",Highest,13
+Story,BTB-54,Write the control matrix,"Acceptance criteria:
+* docs/control_matrix.csv lists control ID, risk addressed, description, type (preventive or detective), frequency, owner, evidence location, and test procedure.
+* Every automated check maps to exactly one row.
+* Partially implemented controls say so, with a link to the ADR explaining the gap.
+* A test asserts every control ID referenced in code exists in the matrix, and vice versa.",,BTB-47,"phase-4,controls,docs",High,5
+Story,BTB-55,Run the detection test with all 13 defects on,"Acceptance criteria:
+* A table shows which control caught each of the 13 defects.
+* A defect no control catches gets a new control or an ADR explaining the gap.
+* Three issues are written up in docs/dq_issue_log.md with root cause, fix, and prevention.
+* The table in the README is generated from an actual run, with the command to reproduce it.",,BTB-47,"phase-4,controls,tests",Highest,13
+Epic,BTB-56,Phase 5: Lineage,"Anyone can trace a dashboard number back to the exact source columns that produced it, and CI fails if that trace breaks.",Phase 5 Lineage,,,High,
+Story,BTB-57,Publish dbt docs to GitHub Pages on every merge,"Acceptance criteria:
+* docs.yml generates dbt docs and deploys to GitHub Pages on merge to main.
+* The published URL is linked from the README as a live demo link.
+* The deployment uses a custom Actions workflow, so the Pages build-rate limit does not apply.
+* The site shows the model-level lineage graph.",,BTB-56,"phase-5,lineage,ci",High,5
+Story,BTB-58,Generate column-level KPI lineage with sqlglot,"Acceptance criteria:
+* sqlglot runs over dbt's compiled SQL, not over hand-written documentation.
+* lineage/kpi_lineage.json and a readable lineage/kpi_lineage.md are produced.
+* The table lists KPI, mart column, intermediate columns, source system, source table, and source column.
+* `make lineage` reproduces both files.",,BTB-56,"phase-5,lineage",Highest,13
+Story,BTB-59,Extend lineage from source file to dashboard field,"Acceptance criteria:
+* Source file to raw table is resolved using audit.pipeline_runs.
+* Reporting column to dashboard field is documented per certified KPI.
+* The full path is written up in docs/architecture.md.
+* A reviewer can follow one KPI end to end without reading code.",,BTB-56,"phase-5,lineage,docs",High,8
+Story,BTB-60,Tag certified models and drive the lineage report from the tags,"Acceptance criteria:
+* Certified dbt models carry meta: {certified: true, owner: Finance}.
+* The lineage report covers exactly the tagged models.
+* Adding a certified model automatically brings it into scope.
+* A certified model with no owner fails a test.",,BTB-56,"phase-5,lineage,dbt",High,5
+Story,BTB-61,Add a CI test that fails when certified lineage cannot be resolved,"Acceptance criteria:
+* A certified KPI column that cannot be traced to raw source columns fails CI.
+* The failure message names the KPI and the unresolved column.
+* The test is part of the required status checks on main.
+* Lineage therefore cannot break silently.",,BTB-56,"phase-5,lineage,ci,tests",Highest,8
+Epic,BTB-62,"Phase 6: BI dashboard, trust console, and failure demo","One dashboard leaders could actually use, where every number shows whether it can be trusted, plus a safe, repeatable failure demonstration.",Phase 6 BI and Trust,,,High,
+Story,BTB-63,Build the Tableau dashboard pages,"Acceptance criteria:
+* Confirm first whether a Windows machine is available and record the answer as an amendment to ADR-012.
+* Operations page: yield, WIP, cycle time by work center.
+* Inventory page: value, aging, negative-balance exceptions.
+* Procurement page: purchase price variance, supplier on-time delivery.
+* Cost page: standard versus actual variance, COGS.
+* Built from the exported certified datasets, not from a live connection.
+* Every page footer shows the batch ID and extract timestamp it was built from, and states the data is synthetic.
+* On Windows, the same pages are rebuilt in Power BI Desktop and the .pbix is committed.",,BTB-62,"phase-6,bi,dashboards",High,13
+Story,BTB-64,Build mart_kpi_trust_status,"Acceptance criteria:
+* Per KPI: last successful refresh time and whether its reconciliations passed in that run.
+* Built on the audit tables.
+* Drives the trust indicator on every KPI tile.
+* A KPI whose reconciliation failed is visibly untrusted rather than merely stale.",,BTB-62,"phase-6,dbt,controls",High,8
+Story,BTB-65,Build the Streamlit trust console pages,"Acceptance criteria:
+* Pages: Inventory, Production completion, Supplier delivery, Data-quality issues, Pipeline runs and reconciliations, Lineage lookup, and Evidence.
+* Lineage lookup lets a user pick a KPI and see its source columns.
+* Evidence page offers a sample evidence pack for download.
+* Connects only through the reporter role against certified reporting tables.
+* A production/sandbox toggle switches which schema is displayed.",,BTB-62,"phase-6,app",High,13
+Story,BTB-66,Export certified datasets with a manifest,"Acceptance criteria:
+* `make export` writes certified reporting tables to exports/ as CSV and Parquet.
+* A manifest records batch ID, row counts, checksums, and refresh time.
+* Only data that passed the publish gate is exported.
+* The manifest states that the data is synthetic.
+* A test asserts manifest checksums match the exported files.",,BTB-62,"phase-6,exports,controls",High,8
+Story,BTB-67,Build the manual failure demo workflow,"Acceptance criteria:
+* demo_failure.yml is a manual workflow with a defect picker.
+* It runs against the sandbox schema only.
+* The console toggle shows the blocked publish and the retained last good dataset.
+* Live reporting data is provably never touched, asserted by a test.
+* The workflow completes in under five minutes so it can be run during a demo.",,BTB-62,"phase-6,ci,controls,demo",Highest,8
+Story,BTB-68,Capture dashboard screenshots for the README,"Acceptance criteria:
+* A screenshot per Tableau page is committed to dashboards/.
+* Screenshots are dated.
+* The README embeds them so a reviewer need not open the workbook.
+* A three-minute screen recording is linked as the backup plan.",,BTB-62,"phase-6,docs,dashboards",Medium,3
+Epic,BTB-69,"Phase 7: Documentation, demo script, and definition of done","A hiring manager understands the project in two minutes, an engineer can rebuild it in ten, and it can be demonstrated live in five.",Phase 7 Documentation,,,High,
+Story,BTB-70,Write metric definitions and resolve the shipped-versus-complete conflict,"Acceptance criteria:
+* Every certified KPI has a business definition in finance and operations language.
+* The deliberate conflict is written up: ERP counts a unit shipped at goods issue, MES counts it complete at final test.
+* Both views, the month-end impact, and the chosen definition are documented.
+* The choice is recorded as a new ADR.
+* Each definition names the model and column that implements it.",,BTB-69,"phase-7,docs,metrics",High,8
+Story,BTB-71,Write the architecture document with a diagram,"Acceptance criteria:
+* A diagram shows sources, ingestion, warehouse, publish gate, exports, and dashboards.
+* The end-to-end lineage path is drawn and described.
+* Schema purposes and the role model are documented.
+* The diagram is committed in a format that renders on GitHub.",,BTB-69,"phase-7,docs",High,5
+Story,BTB-72,Write the README with live links and reproducible numbers,"Acceptance criteria:
+* The four live demo links are at the top: trust console, Tableau dashboard, dbt docs, and the repository.
+* Then: the problem, how to run it, the defect-detection results table, the tuning before-and-after numbers, and a Jira board screenshot.
+* Links to DECISIONS.md, the control matrix, the lineage report, and a sample evidence pack.
+* It states plainly that the data is synthetic and the controls are simulated.
+* Every number names the command that reproduces it, and a test asserts no number appears without one.",,BTB-69,"phase-7,docs",Highest,8
+Story,BTB-73,Write the five-minute demo script,"Acceptance criteria:
+* Seven steps at roughly 45 seconds each, matching the agreed running order.
+* The backup plan is included: warm up every live link five minutes beforehand, with a screen recording and dated screenshots as fallback.
+* The failure demo step runs against sandbox only.
+* The script has been rehearsed end to end and the elapsed time recorded.",,BTB-69,"phase-7,docs,demo",High,5
+Story,BTB-74,Write interview notes with answers drawn from the decision log,"Acceptance criteria:
+* Ten likely questions covering ITGC areas, IPE, preventive versus detective controls, SCD Type 2, grain, and lineage.
+* Each answer cites the ADR or control it comes from.
+* Answers state limitations honestly, including segregation of duties.
+* No answer claims SOX compliance.",,BTB-69,"phase-7,docs",High,8
+Story,BTB-75,Verify the definition of done on a clean machine,"Acceptance criteria:
+* `make all` rebuilds data, warehouse, controls, lineage, exports, and evidence from scratch on a clean checkout.
+* All live links work from a fresh browser and the nightly run updates the refresh time.
+* The failure demo blocks publishing in sandbox and leaves the live demo untouched.
+* CI is green, every merged PR carries a Jira key, and the backlog CSV imports into Jira cleanly.
+* All 13 planted defects are detected, or the gap is documented in DECISIONS.md.
+* Every certified KPI has a definition, end-to-end lineage, and at least one reconciliation.
+* DECISIONS.md has an ADR for every tool, model shape, metric definition, and control design.
+* Every number in the README matches a reproducible run.",,BTB-69,"phase-7,tests,governance",Highest,8
