@@ -142,3 +142,28 @@ jobs:
         # Includes the integration tests, so every PR re-proves that each role
         # is denied what it should not reach (CTRL-013).
         run: uv run pytest -ra --cov=. --cov-report=term-missing
+
+      # BTB-51: every PR runs the pipeline against a freshly generated
+      # dataset, so a model that breaks a business rule cannot be merged. This
+      # replaces the placeholder job that used to report success while running
+      # nothing.
+      - name: Install dbt dependencies
+        run: make dbt-deps
+
+      - name: Generate the demo profile
+        run: make data
+
+      - name: Load into raw
+        run: make load
+
+      - name: dbt build (models + tests)
+        run: make build
+
+      - name: Upload dbt artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-target-${{ github.run_id }}
+          path: warehouse/dbt/target/
+          retention-days: 7
+          if-no-files-found: ignore
