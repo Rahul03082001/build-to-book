@@ -73,12 +73,13 @@ Story,BTB-14,Declare per-extract schemas and validate with pandera,"Acceptance c
 * Validation returns the failing rows rather than only a boolean.
 * A schema change that breaks an extract fails a test.
 * Each extract's natural key is declared alongside its schema (ADR-017).",,BTB-9,"phase-1,ingestion",High,5
-Story,BTB-15,"Build the incremental, idempotent loader","Acceptance criteria:
-* Loading is keyed on each extract's declared natural source ID.
-* Running the loader twice in a row adds zero rows the second time.
-* A duplicate within a source extract is distinguished from an already-loaded row.
+Story,BTB-15,"Build the incremental, idempotent loader (staging table + anti-join)","Acceptance criteria:
+* Each file lands in a per-batch staging table in raw, then inserts via a LEFT JOIN anti-join on the declared natural key (ADR-020).
+* Running the loader twice in a row inserts zero rows the second time and reports a non-zero skipped count -- not merely an unchanged row total.
+* Rows in file, rows inserted, and rows skipped are recorded separately.
+* Staging tables are dropped on both the success and the failure path, so raw does not accumulate litter.
 * Loads are chunked so the full profile does not exhaust memory.
-* A failed load leaves raw in a consistent state.",,BTB-9,"phase-1,ingestion",Highest,8
+* A failed load leaves raw in a consistent state.",,BTB-9,"phase-1,ingestion",Highest,5
 Story,BTB-16,Stamp batch provenance on every landed row,"Acceptance criteria:
 * Every raw row carries _batch_id, _source_file, _file_sha256, and _loaded_at.
 * The file hash is computed from file bytes before parsing.
@@ -386,3 +387,9 @@ Story,BTB-75,Verify the definition of done on a clean machine,"Acceptance criter
 * Every certified KPI has a definition, end-to-end lineage, and at least one reconciliation.
 * DECISIONS.md has an ADR for every tool, model shape, metric definition, and control design.
 * Every number in the README matches a reproducible run.",,BTB-69,"phase-7,tests,governance",Highest,8
+Story,BTB-76,Distinguish a source-side duplicate from an already-loaded row,"Acceptance criteria:
+* A duplicate on the natural key *within a single extract* is rejected and reported, not silently skipped -- it means the upstream interface posted twice.
+* A row already present in raw from an earlier run is skipped and counted, not rejected -- it means the pipeline was rerun.
+* The two counts are recorded separately in audit.pipeline_runs.
+* A test asserts a rerun produces skips and zero rejects, and that a planted within-file duplicate produces rejects matching defects_manifest.json exactly.
+* Without this distinction the duplicate_goods_receipt control cannot fire, so CTRL-001 depends on it.",,BTB-9,"phase-1,ingestion,controls,defects",Highest,5
