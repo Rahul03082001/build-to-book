@@ -47,6 +47,26 @@ the standard cost in force on each movement's posting date.
 - **Implemented by:** *Phase 1 (BTB-21)* — inventory balance mart.
 - **Certified:** `meta: {certified: true, owner: Finance}`
 
+**The subledger is movements *plus* revaluations.** Standard costing values
+each movement at the standard in force on its posting date, so stock received
+at an old cost and issued at a new one leaves a value residue after the
+quantity has netted out. A standard cost change therefore posts an
+`inventory_revaluations` document — on-hand quantity times the cost delta,
+offset to price difference (account 231000) — and CTRL-003 compares
+**movements + revaluations** against GL account 130000.
+
+Omitting revaluations does not break the reconciliation, which is what makes it
+dangerous: movements and GL postings share the same valuation, so both sides
+carry the same error and the check still passes. It breaks the *meaning* of the
+number instead. Before revaluation was modelled, 20 of 300 materials on the
+full profile closed at a negative value with every physical quantity correct
+([ADR-023](DECISIONS.md#adr-023-post-a-revaluation-when-a-standard-cost-changes)).
+
+The invariant that holds it honest, and the one to test rather than the
+reconciliation alone:
+
+> closing inventory value = on-hand quantity × current standard cost
+
 **Why it can disagree with the GL.** Three causes, all of them planted as
 defects: a duplicate receipt inflates the subledger; a unit-of-measure error
 mis-values one component; a backdated posting moves value into a closed period.
@@ -106,3 +126,4 @@ finding — units that passed test but were never confirmed in ERP.
 | Date | Metric | Change | ADR |
 | --- | --- | --- | --- |
 | 2026-11-02 | — | Global assumptions settled: posting date, USD, standard cost | ADR-007 |
+| 2026-11-02 | Inventory value | Subledger redefined as goods movements **plus** standard cost revaluations | ADR-023 |

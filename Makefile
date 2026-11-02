@@ -94,8 +94,8 @@ init: up roles ## Start the warehouse and apply roles
 # Pipeline
 # ---------------------------------------------------------------------------
 .PHONY: data
-data: ## Generate synthetic source extracts + control totals  [PHASE 1]
-	$(call NOT_YET,Generate the $(PROFILE) profile into data/,Phase 1 (BTB-10..BTB-13))
+data: ## Generate synthetic source extracts + control totals
+	$(PY) -m generator --profile $(PROFILE) --seed $(SEED)
 
 .PHONY: load
 load: ## Validate and incrementally load extracts into raw  [PHASE 1]

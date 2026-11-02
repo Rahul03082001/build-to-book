@@ -25,7 +25,6 @@ profiles:
     purchase_order_lines: 1200
     production_orders: 400
     mes_events: 60000
-    gl_postings: 9000
 
   full:
     description: Local profile for the performance tuning study. Not hosted.
@@ -37,7 +36,6 @@ profiles:
     purchase_order_lines: 20000
     production_orders: 8000
     mes_events: 5000000
-    gl_postings: 400000
 
 # ---------------------------------------------------------------------------
 # Business domain. Component classes mirror a rack-scale server build.
@@ -87,6 +85,17 @@ domain:
 
   currency: USD
   uom_default: EA
+
+  # Inventory turnover. Goods issues are generated per goods receipt rather
+  # than from a target posting count: deriving them from a posting target gave
+  # ~8.5 issues per receipt on the full profile and drained every material to
+  # zero closing stock -- arithmetically valid, commercially nonsense.
+  issues_per_receipt: 2.4
+
+  # Share of cumulative receipts kept on hand per material, so closing stock
+  # is a few weeks of supply. Inventory value and aging are this slice's
+  # headline KPIs and are meaningless at zero.
+  inventory_retention: 0.18
 
 # ---------------------------------------------------------------------------
 # Period close. Postings dated into a closed period are a control violation,

@@ -40,6 +40,7 @@ SOX-style controls. Nothing here claims SOX compliance (ADR-019).
 | [ADR-020](#adr-020-idempotent-loading-by-staging-table-and-anti-join) | 2026-11-02 | Idempotent loading by staging table and anti-join | Accepted |
 | [ADR-021](#adr-021-publish-by-pointing-views-at-versioned-tables) | 2026-11-02 | Publish by pointing views at versioned tables | Accepted |
 | [ADR-022](#adr-022-control-totals-as-a-json-sidecar-per-extract) | 2026-11-02 | Control totals as a JSON sidecar per extract | Accepted |
+| [ADR-023](#adr-023-post-a-revaluation-when-a-standard-cost-changes) | 2026-11-02 | Post a revaluation when a standard cost changes | Accepted |
 
 ---
 
@@ -1527,3 +1528,102 @@ them into the same sidecar shape — noted as follow-up rather than built now.
 BTB-13's test asserts the sidecar matches the extract it accompanies. A
 further test deletes a sidecar and asserts the load fails rather than skipping
 the completeness check.
+
+---
+
+## ADR-023: Post a revaluation when a standard cost changes
+
+- Date: 2026-11-02
+- Status: Accepted
+- Jira: BTB-12 | PR/commit: BTB-10-inventory-generator
+- Area: Metrics
+
+### Context
+
+Inventory is valued at standard cost, and each movement is valued at the
+standard in force on its posting date
+([ADR-007](#adr-007-scd-type-2-snapshots-on-material-master-and-standard-cost),
+docs/metric_definitions.md). Building the generator exposed a consequence that
+had not been thought through.
+
+Stock received at an old standard cost and issued at a new one leaves a value
+residue after the quantity has netted out. A worked example from the generated
+data: material 1000056 was received at \$435.00, the standard cost rose to
+\$452.53, and the stock was then issued at the new cost. Closing quantity was
+zero; closing *value* was **minus \$87.65**.
+
+On the demo profile (three months) the drift was small enough to miss. On the
+full profile (twelve months) **20 of 300 materials closed at a negative
+value** while every physical quantity was correct, and the inventory account in
+total went negative. The inventory balance sheet figure had quietly stopped
+meaning anything, and no existing control would have caught it: the subledger
+still tied to the GL, because both sides carried the same wrong number.
+
+### Options considered
+
+1. **Post a revaluation when the standard cost changes**: revalue stock on
+   hand by the cost delta and post the difference to a price-difference
+   account, which is what standard costing actually does. The invariant
+   becomes exact — inventory balance equals on-hand quantity times current
+   standard cost. Con: an eighth extract, and the subledger for CTRL-003 is
+   now movements *plus* revaluations rather than movements alone.
+2. **Value issues at the cost in force when the stock was received**: the
+   quantity and value net out together, so no residue and no extra extract.
+   Con: that is moving-average or FIFO costing, not standard costing. It would
+   contradict ADR-007 and the metric definitions, and it would remove the
+   price variance that is the entire point of a standard cost system.
+3. **Allow no standard cost changes inside the reporting window**: move every
+   change before `period_start` and the drift cannot arise. Con: it makes the
+   SCD Type 2 snapshot decorative — an as-of join bug would become invisible,
+   and the unapproved-cost-change defect would have nothing to act on. It
+   avoids the problem by removing the thing being demonstrated.
+
+### Decision
+
+A standard cost change posts an `inventory_revaluations` document: on-hand
+quantity times the cost delta, debiting inventory and crediting price
+difference (account 231000) when the cost rises, and the reverse when it
+falls. The revaluation carries no quantity, because nothing physically moved.
+
+The inventory subledger is therefore **goods movements plus revaluations**.
+CTRL-003 compares that sum against GL account 130000.
+
+### Reasons
+
+Standard costing produces price variances by design; a model that values
+movements at a changing standard but never revalues the stock on hand is not
+standard costing, it is an error. Option 2 would have made the arithmetic tidy
+by abandoning the costing method the project claims to use, and option 3 by
+abandoning the SCD Type 2 story — both trade away something the project exists
+to demonstrate.
+
+What makes this worth an ADR rather than a quiet fix is how the fault behaved.
+It did not break the reconciliation. Movements and GL postings derive from the
+same valuation, so both sides moved together and CTRL-003 passed throughout. A
+reconciliation that two sources satisfy by sharing a common error is weaker
+evidence than it looks, and the only thing that caught this was asserting an
+*independent* invariant: closing value must equal quantity times current
+standard cost. That is a lesson worth keeping in the log.
+
+### Consequences
+
+Easier: the inventory balance is now exactly on-hand quantity times current
+standard cost, per material, which is what an inventory valuation report
+shows. Price variance becomes visible as its own account instead of
+contaminating inventory. The approver on each cost change flows through to the
+revaluation, so CTRL-007 can trace a revaluation to its authorisation.
+
+Harder: an eighth extract to ingest, model and document. CTRL-003's definition
+is now a sum of two sources, so the control must be written to include
+revaluations — omitting them would reintroduce exactly the drift this fixes.
+A reviewer reading the older ADR-014 and ADR-022 text will not see this
+mentioned; it is recorded here and in docs/metric_definitions.md.
+
+### How a reviewer can verify it
+
+`test_closing_value_equals_quantity_times_current_standard_cost` asserts the
+invariant per material against the generator's own output.
+`test_no_material_closes_at_a_negative_value` covers the symptom that exposed
+it. Both were confirmed to fail when the revaluation step is removed, and
+`docs/metric_definitions.md` records the inventory value definition that
+depends on it.
