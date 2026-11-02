@@ -21,6 +21,10 @@ select
     currency                         as currency_code,
     posting_date,
     document_date,
+    -- When the document was entered. CTRL-006 compares this against the close
+    -- date of the period the posting lands in; a posting entered after its
+    -- period closed restates figures that were already reported.
+    entered_on,
     to_char(posting_date, 'YYYY-MM') as posting_period,
     reference_document,
     material_number,

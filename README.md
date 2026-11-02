@@ -104,7 +104,7 @@ Built in vertical slices, so there is always something runnable
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **0** | Repo skeleton, 19 ADRs, backlog, CI, warehouse roles | **Complete** |
-| 1 | Inventory slice end to end, deployed live | **In progress** — pipeline complete through the publish gate (BTB-10…BTB-23, BTB-76); live deployment outstanding |
+| 1 | Inventory slice end to end, deployed live | **In progress** — pipeline, controls and planted defects done (BTB-10…BTB-23, BTB-26, BTB-27, BTB-76); live deployment outstanding |
 | 2 | All four source systems, 13 planted defects at volume | Not started |
 | 3 | Full star schema in dbt, plus a performance tuning study | Not started |
 | 4 | Reconciliations, evidence packs, access review, control matrix | Not started |
@@ -143,7 +143,7 @@ PostgreSQL 16.15):
 
 | Result | Command |
 | --- | --- |
-| 278 unit tests pass | `make test` |
+| 279 unit tests pass | `make test` |
 | 37 role-permission integration tests pass | `make init && .venv/bin/pytest -m integration` |
 | Lint clean: ruff check, ruff format, sqlfluff | `make lint` |
 | Warehouse starts healthy, 9 schemas created | `make up` |
@@ -162,9 +162,10 @@ PostgreSQL 16.15):
 | 10 control results recorded per run, passes included | `make controls` |
 | A forced failure blocks the publish and `reporting` keeps its previous version, unchanged | `.venv/bin/pytest -k blocks_and_leaves_reporting` |
 | Repeated publishes work; exactly 2 versions retained per mart | `make publish && make publish` |
+| 2 of 13 defects planted and detected, counts matching the manifest exactly | `make data-defects && make load && make build && make controls` |
 | Subledger ties to GL to the cent, every period | `.venv/bin/pytest -k subledger_ties` |
 | Closing inventory = quantity × current standard cost, per material | `.venv/bin/pytest -k closing_value` |
-| CI green on `main`: lint + all 355 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
+| CI green on `main`: lint + all 369 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
 | Direct push to `main` rejected: `GH006 ... protected branch hook declined` | `git commit --allow-empty -m "BTB-0: test" && git push origin main` |
 
 The role tests were also confirmed to **fail** when a privilege is deliberately
@@ -184,9 +185,25 @@ is revoked — a control that cannot fail is not evidence of anything.
 
 Which control caught each of the 13 planted defects.
 
-*Produced by Phase 4 (BTB-55), which runs the pipeline with all 13 defects
-switched on and records which control caught each one. The reproducing command
-is published here alongside the results, once the run exists.*
+Two of the thirteen are planted and detected so far. The rest arrive with
+their source systems in Phase 2.
+
+| # | Defect | Caught by | Type | Detected / planted |
+| --- | --- | --- | --- | --- |
+| 1 | Duplicate goods receipts | CTRL-001 (zero rejected rows) | Preventive — rejected at load | 9 / 9 |
+| 2 | Backdated GL posting | CTRL-006 (closed-period integrity) | Preventive — blocks the publish | 4 / 4 |
+
+Reproduce with:
+
+```bash
+make clean-db && make init && make data && make load && make build && make publish && make data-defects && make load && make build && make publish
+```
+
+The second `make publish` is blocked by CTRL-001 and CTRL-006, and `reporting`
+keeps the dataset the first one published. Counts come from
+`defects_manifest.json`, which lists every injected record — so the tests
+assert that each control caught *exactly* what was planted, in both
+directions.
 
 ### Performance tuning
 

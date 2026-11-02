@@ -167,6 +167,10 @@ CREATE TABLE IF NOT EXISTS raw.gl_postings (
     _file_sha256            char(64)       NOT NULL,
     _loaded_at              timestamptz    NOT NULL DEFAULT now()
 );
+-- CREATE TABLE IF NOT EXISTS does not alter an existing table, so a
+-- warehouse created before entered_on existed needs the column added.
+ALTER TABLE raw.gl_postings ADD COLUMN IF NOT EXISTS entered_on date;
+
 CREATE UNIQUE INDEX IF NOT EXISTS gl_postings_nk
     ON raw.gl_postings (accounting_document, fiscal_year, line_item);
 CREATE INDEX IF NOT EXISTS gl_postings_account_posting_idx

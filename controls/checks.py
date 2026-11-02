@@ -296,20 +296,110 @@ GL_DOCUMENTS_BALANCE = Check(
 )
 
 
+# ---------------------------------------------------------------------------
+# CTRL-001, second half: no row was rejected.
+#
+# The accounting identity above proves every source row is *accounted for*. It
+# passes when a row was rejected, because a reject is accounted for -- and that
+# is not good enough. A rejected row means the certified dataset was computed
+# from an extract the source got wrong, which is exactly what the gate exists
+# to stop.
+#
+# This is what makes the duplicate-receipt defect preventive: the loader
+# refuses the duplicate at the door (ADR-020), and this check stops the run
+# rather than absorbing the loss quietly.
+#
+# Zero tolerance in Phase 1. A reject threshold is defensible for a noisy feed
+# and is recorded as follow-up (BTB-17), but a threshold chosen now would be a
+# number with no evidence behind it.
+# ---------------------------------------------------------------------------
+NO_REJECTED_ROWS = Check(
+    check_id="CTRL-001",
+    name="No source row was rejected during loading",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "A rejected row means the source sent something invalid, so the certified dataset "
+        "is computed from an incomplete extract. The row counts still reconcile, which is "
+        "why this has to be a separate check."
+    ),
+    sql="""
+        select
+            r.extract_name || ' row ' || r.source_row || ': '
+                || r.rejection_rule || ' -- ' || r.rejection_detail as exception_detail
+        from audit.rejected_rows as r
+        where r.batch_id = %(batch_id)s
+        order by 1
+    """,
+)
+
+# ---------------------------------------------------------------------------
+# CTRL-006: closed-period integrity.
+#
+# A posting whose entry date falls after its period's close date restates
+# figures that were already reported. Preventive by necessity: detecting it
+# after publishing means the restatement has already reached a leader's screen.
+#
+# The close lag is passed in from the generator config rather than hardcoded
+# here, so the control and the data cannot disagree about when a period locks
+# -- a disagreement would make this check either blind or permanently failing.
+# Calendar days approximate business days; a real close calendar arrives with
+# the finance extracts in Phase 2.
+# ---------------------------------------------------------------------------
+CLOSED_PERIOD_INTEGRITY = Check(
+    check_id="CTRL-006",
+    name="No posting was entered into a closed period",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "A posting entered after its period closed restates figures that have already been "
+        "reported. Nothing about the amount or the accounts looks unusual -- only the pair "
+        "of dates reveals it."
+    ),
+    sql="""
+        with closes as (
+            select
+                accounting_document,
+                fiscal_year,
+                line_item,
+                posting_period,
+                entered_on,
+                (
+                    date_trunc('month', posting_date)
+                    + interval '1 month - 1 day'
+                    + (%(close_lag_days)s || ' days')::interval
+                )::date as period_closed_on
+            from {schema}.fct_gl_postings
+        )
+
+        select
+            'document ' || accounting_document || '/' || fiscal_year
+                || ' line ' || line_item || ' posts to ' || posting_period
+                || ' but was entered ' || entered_on
+                || ', after that period closed on ' || period_closed_on
+                as exception_detail
+        from closes
+        where entered_on > period_closed_on
+        order by 1
+    """,
+)
+
+
 #: Checks that run in Phase 1, in the order they are reported.
 #:
-#: CTRL-006 (closed-period integrity) is absent on purpose. Detecting a
-#: posting made *into* a closed period needs an entry timestamp distinct from
-#: the posting date, which the generator does not yet emit. Adding a check that
-#: cannot distinguish a backdated entry from a normal one would be worse than
-#: having none -- it lands with the defect that exercises it (BTB-27).
+#: CTRL-006 arrived with BTB-27, once the generator emitted `entered_on`. It
+#: was deliberately absent before that: a check that cannot distinguish a
+#: backdated entry from a normal one is worse than no check, because it looks
+#: like coverage.
 PHASE_1_CHECKS: tuple[Check, ...] = (
     SOURCE_TO_RAW_COMPLETENESS,
+    NO_REJECTED_ROWS,
     RAW_TO_MART_COMPLETENESS,
     GL_DOCUMENTS_BALANCE,
     SUBLEDGER_TO_GL,
     INVENTORY_VALUE_AGREES_WITH_COST,
     NO_NEGATIVE_ON_HAND,
+    CLOSED_PERIOD_INTEGRITY,
 )
 
 

@@ -120,3 +120,9 @@ sources:
               Debits positive, credits negative, so a period's net movement on
               an account is a plain sum.
             data_tests: [not_null]
+          - name: entered_on
+            description: >
+              When the document was entered, as distinct from the period it
+              posts to. A posting entered after its period closed restates
+              figures that were already reported (CTRL-006).
+            data_tests: [not_null]

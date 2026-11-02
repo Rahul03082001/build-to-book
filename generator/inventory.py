@@ -42,7 +42,7 @@ from typing import Any
 
 import numpy as np
 
-from generator import ids
+from generator import defects, ids
 from generator.config import GeneratorConfig, Profile
 from generator.writers import ExtractSpec, money
 
@@ -245,6 +245,11 @@ EXTRACT_SPECS: dict[str, ExtractSpec] = {
             "currency",
             "posting_date",
             "document_date",
+            # When the document was created in the system, as distinct from
+            # the period it posts to. Without this, a posting backdated into a
+            # closed period is indistinguishable from one entered on time --
+            # which is why CTRL-006 could not be built until now.
+            "entered_on",
             "reference_document",
             "material_number",
             "entered_by",
@@ -473,6 +478,23 @@ class InventoryGenerator:
         # approver who authorised it -- CTRL-007 joins the two.
         self._standard_cost_rows = rows
         return rows, lookup
+
+    def period_close_date(self, posting_date: dt.date) -> dt.date:
+        """When the period containing a date locks.
+
+        ``close_lag_days`` after period end. Approximated as calendar days
+        rather than business days: the generator only needs a stable boundary
+        for the control to test against, and a real close calendar arrives with
+        the finance extracts in Phase 2.
+        """
+        lag = int(self.config.close_calendar["close_lag_days"])
+        first_of_next = (
+            dt.date(posting_date.year + 1, 1, 1)
+            if posting_date.month == 12
+            else dt.date(posting_date.year, posting_date.month + 1, 1)
+        )
+        period_end = first_of_next - dt.timedelta(days=1)
+        return period_end + dt.timedelta(days=lag)
 
     @staticmethod
     def cost_on(
@@ -849,6 +871,14 @@ class InventoryGenerator:
                             "currency": CURRENCY,
                             "posting_date": movement["posting_date"],
                             "document_date": movement["document_date"],
+                            # Entered on or just after the posting date, and
+                            # always before the period closes -- clean data
+                            # contains no backdated entry.
+                            "entered_on": min(
+                                movement["posting_date"]
+                                + dt.timedelta(days=int(self.rng.integers(0, 3))),
+                                self.period_close_date(movement["posting_date"]),
+                            ),
                             "reference_document": material_document,
                             "material_number": material_number,
                             "entered_by": movement["entered_by"],
@@ -884,12 +914,54 @@ class InventoryGenerator:
                         "currency": CURRENCY,
                         "posting_date": revaluation["posting_date"],
                         "document_date": revaluation["posting_date"],
+                        "entered_on": revaluation["posting_date"],
                         "reference_document": revaluation["revaluation_document"],
                         "material_number": material_number,
                         "entered_by": "MLEDGER",
                     }
                 )
         return rows
+
+    # -- defect injection -------------------------------------------------
+    def inject_defects(
+        self, data: InventoryData, enabled: Sequence[str]
+    ) -> list[defects.InjectedRecord]:
+        """Plant the requested defects and return what was planted.
+
+        Runs after the clean data is complete and internally consistent, so a
+        defect is a deliberate deviation from a known-good baseline rather
+        than an artefact of generation order. Injectors run in registry order
+        for determinism.
+
+        An unimplemented defect raises rather than being skipped: silently
+        ignoring a requested defect would make a detection test pass with
+        nothing planted.
+        """
+        planted: list[defects.InjectedRecord] = []
+        for key in defects.REGISTRY:
+            if key not in enabled:
+                continue
+            spec = self.config.defects[key]
+            injector = defects.injector_for(key)
+            count = int(spec.get("count", 1))
+
+            if key == "duplicate_goods_receipt":
+                planted.extend(injector(data.goods_movements, data.gl_postings, count, self.rng))
+            elif key == "backdated_gl_posting":
+                planted.extend(
+                    injector(
+                        data.gl_postings,
+                        count,
+                        self.period_close_date,
+                        lambda year: self._ad_range(year).next(),
+                        self.rng,
+                    )
+                )
+            else:  # pragma: no cover - guarded by injector_for above
+                raise NotImplementedError(
+                    f"{key} has an injector but generate() does not know how to call it"
+                )
+        return planted
 
     # -- orchestration ----------------------------------------------------
     def generate(self) -> InventoryData:

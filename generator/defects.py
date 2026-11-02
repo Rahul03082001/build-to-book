@@ -229,6 +229,10 @@ class DefectManifest:
             raise KeyError(f"{record.defect_key!r} is not in the defect registry")
         self.records.append(record)
 
+    @property
+    def total_injected(self) -> int:
+        return len(self.records)
+
     def count_for(self, defect_key: str) -> int:
         return sum(1 for r in self.records if r.defect_key == defect_key)
 

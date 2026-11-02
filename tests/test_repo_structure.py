@@ -44,6 +44,7 @@ REQUIRED_FILES = [
     "generator/config.yaml",
     "generator/config.py",
     "generator/defects.py",
+    "generator/injectors.py",
     "generator/ids.py",
     "generator/inventory.py",
     "generator/writers.py",
