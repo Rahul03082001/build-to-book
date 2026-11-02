@@ -8,8 +8,10 @@ without a warehouse.
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import json
 import pathlib
+import uuid
 
 import numpy as np
 import pandas as pd
@@ -314,3 +316,107 @@ def test_completeness_requires_every_row_accounted_for() -> None:
     # A shortfall means rows vanished between the file and the warehouse.
     assert not result(9, 0, 0, 10).completeness_ok
     assert not result(11, 0, 0, 10).completeness_ok
+
+
+# ---------------------------------------------------------------------------
+# CTRL-001: value totals, not only row counts
+# ---------------------------------------------------------------------------
+def _result(
+    inserted: int,
+    skipped: int,
+    rejected: int,
+    declared_rows: int,
+    declared_value: str | None = None,
+    file_value: str | None = None,
+) -> loader.LoadResult:
+    return loader.LoadResult(
+        run_id=uuid.uuid4(),
+        batch_id="b",
+        extract_name="goods_movements",
+        source_file="goods_movements.csv",
+        file_sha256="0" * 64,
+        git_commit_sha="abc",
+        rows_in_file=declared_rows,
+        rows_inserted=inserted,
+        rows_skipped=skipped,
+        rows_rejected=rejected,
+        control_total_rows=declared_rows,
+        control_total_value=(
+            decimal.Decimal(declared_value) if declared_value is not None else None
+        ),
+        started_at=dt.datetime.now(dt.UTC),
+        value_total_in_file=(decimal.Decimal(file_value) if file_value is not None else None),
+    )
+
+
+def test_value_total_mismatch_fails_completeness() -> None:
+    """The half of CTRL-001 that row counts cannot cover.
+
+    A row whose amount was altered in transit keeps the count intact and
+    changes the money. The matrix claimed this was checked before the loader
+    actually did it.
+    """
+    result = _result(10, 0, 0, 10, declared_value="100.00", file_value="100.01")
+    assert result.rows_accounted_ok, "the row count should still reconcile"
+    assert not result.value_total_ok
+    assert not result.completeness_ok
+    assert "value total" in result.completeness_detail
+    assert "0.01" in result.completeness_detail
+
+
+def test_value_total_match_passes_completeness() -> None:
+    result = _result(10, 0, 0, 10, declared_value="100.00", file_value="100.00")
+    assert result.value_total_ok
+    assert result.completeness_ok
+    assert result.completeness_detail == ""
+
+
+def test_extract_with_no_monetary_column_skips_the_value_check() -> None:
+    """Master data has no value total, and asserting 0.00 would be a lie."""
+    result = _result(60, 0, 0, 60, declared_value=None, file_value=None)
+    assert result.value_total_ok
+    assert result.completeness_ok
+
+
+def test_row_shortfall_and_value_mismatch_are_reported_separately() -> None:
+    result = _result(9, 0, 0, 10, declared_value="100.00", file_value="90.00")
+    assert not result.rows_accounted_ok
+    assert not result.value_total_ok
+    detail = result.completeness_detail
+    assert "row count" in detail and "value total" in detail
+
+
+def test_value_total_is_summed_from_the_file_including_rejected_rows(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The trailer describes the file as it arrived, not what survived.
+
+    Excluding rejected rows from the sum would make a file with an invalid row
+    *appear* to reconcile, hiding the fault the trailer exists to reveal.
+    """
+    csv_path = tmp_path / "inventory_revaluations.csv"
+    csv_path.write_text(
+        "revaluation_document,fiscal_year,material_number,posting_date,"
+        "old_standard_cost_usd,new_standard_cost_usd,quantity_on_hand,amount_usd,"
+        "currency,approved_by\r\n"
+        "5200000001,2026,1000000,2026-09-01,100.00,110.00,10,100.00,USD,A.PERSON\r\n"
+        # Invalid: quantity_on_hand must be positive. Its amount still counts
+        # toward the file's declared total.
+        "5200000002,2026,1000001,2026-09-01,100.00,110.00,0,50.00,USD,A.PERSON\r\n"
+    )
+    (tmp_path / "inventory_revaluations.control_totals.json").write_text(
+        json.dumps(
+            {
+                "row_count": 2,
+                "value_column": "amount_usd",
+                "value_total": "150.00",
+                "natural_key": ["revaluation_document", "fiscal_year"],
+            }
+        )
+    )
+
+    frame = pd.read_csv(csv_path, dtype=str)
+    total = sum(decimal.Decimal(v) for v in frame["amount_usd"])
+    assert total == decimal.Decimal("150.00"), (
+        "the file's own sum must include the row that will be rejected"
+    )

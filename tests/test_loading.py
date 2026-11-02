@@ -286,6 +286,8 @@ def test_a_failed_load_is_still_recorded(
     # Bad rows are quarantined, not dropped, and the shortfall is visible.
     assert result.rows_rejected == 2
     assert not result.completeness_ok
+    assert not result.rows_accounted_ok, "the inflated row count should be the failure"
+    assert "row count" in result.completeness_detail
 
     with conn.cursor() as cursor:
         cursor.execute(
@@ -321,8 +323,13 @@ def test_in_file_duplicate_is_rejected_while_a_rerun_is_skipped(
         writer = csv.DictWriter(fh, fieldnames=list(rows[0]), lineterminator="\r\n")
         writer.writeheader()
         writer.writerows(rows)
+    # The trailer describes the file as it arrived, so adding a row changes the
+    # value total as well as the count. Updating only the count made this test
+    # fail once the value-total half of CTRL-001 was implemented -- the check
+    # was right and the fixture was wrong.
     sidecar = json.loads((extracts / "goods_movements.control_totals.json").read_text())
     sidecar["row_count"] = len(rows)
+    sidecar["value_total"] = str(sum((D(row["amount_usd"]) for row in rows), D("0")))
     (tmp_path / "goods_movements.control_totals.json").write_text(json.dumps(sidecar))
 
     result = loader.load_extract(conn, "goods_movements", target, loader.new_batch_id())

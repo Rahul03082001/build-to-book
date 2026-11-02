@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             totals["skipped"] += result.rows_skipped
             totals["rejected"] += result.rows_rejected
             if not result.completeness_ok:
-                incomplete.append(name)
+                incomplete.append(f"{name} ({result.completeness_detail})")
 
             print(
                 f"{name:24}{result.rows_in_file:>9}{result.rows_inserted:>10}"
@@ -120,7 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     # A completeness shortfall means rows vanished between the file and the
     # warehouse. That is a CTRL-001 finding and must not exit zero.
     if incomplete:
-        print(f"COMPLETENESS FAILED for: {', '.join(incomplete)}", file=sys.stderr)
+        print("COMPLETENESS FAILED (CTRL-001):", file=sys.stderr)
+        for problem in incomplete:
+            print(f"  {problem}", file=sys.stderr)
     if failures:
         print("LOAD FAILURES:", file=sys.stderr)
         for failure in failures:
