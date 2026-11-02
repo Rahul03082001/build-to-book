@@ -104,7 +104,7 @@ Built in vertical slices, so there is always something runnable
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **0** | Repo skeleton, 19 ADRs, backlog, CI, warehouse roles | **Complete** |
-| 1 | Inventory slice end to end, deployed live | **In progress** — generator done (BTB-10…BTB-13) |
+| 1 | Inventory slice end to end, deployed live | **In progress** — generator + validated loader done (BTB-10…BTB-18, BTB-76) |
 | 2 | All four source systems, 13 planted defects at volume | Not started |
 | 3 | Full star schema in dbt, plus a performance tuning study | Not started |
 | 4 | Reconciliations, evidence packs, access review, control matrix | Not started |
@@ -150,6 +150,10 @@ PostgreSQL 16.15):
 | `make roles` is idempotent — clean exit on a second run | `make roles && make roles` |
 | `reporter` is refused on `raw`, permitted on `reporting` | `.venv/bin/pytest -m integration -k reporter` |
 | 8 synthetic extracts generated, byte-identical across runs | `make data` |
+| 14,727 rows loaded into `raw` with full provenance | `make load` |
+| Rerun inserts 0 rows and reports 14,727 skipped | `make load && make load` |
+| Audit trail refuses UPDATE, DELETE **and** TRUNCATE | `.venv/bin/pytest -k refuses_modification` |
+| Source-side duplicate rejected while a rerun is skipped | `.venv/bin/pytest -k in_file_duplicate` |
 | Subledger ties to GL to the cent, every period | `.venv/bin/pytest -k subledger_ties` |
 | Closing inventory = quantity × current standard cost, per material | `.venv/bin/pytest -k closing_value` |
 | CI green on `main`: lint + all 193 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
