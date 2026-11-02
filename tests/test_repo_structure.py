@@ -42,7 +42,12 @@ REQUIRED_FILES = [
     ".pre-commit-config.yaml",
     "backlog/jira_backlog.csv",
     "generator/config.yaml",
+    "generator/config.py",
     "generator/defects.py",
+    "generator/ids.py",
+    "generator/inventory.py",
+    "generator/writers.py",
+    "generator/__main__.py",
     "warehouse/sql/roles.sql",
     "scripts/psql.sh",
     "scripts/check_commit_message.py",
@@ -93,6 +98,18 @@ def test_makefile_declares_target(repo_root: pathlib.Path, target: str) -> None:
     makefile = (repo_root / "Makefile").read_text()
     assert f"\n{target}:" in makefile, f"Makefile has no `{target}` target"
     assert f".PHONY: {target}" in makefile, f"`{target}` is not declared .PHONY"
+
+
+# Targets whose phase has landed. A built target that quietly reverts to a stub
+# would otherwise still pass the declaration test above.
+BUILT_MAKE_TARGETS = ["data"]
+
+
+@pytest.mark.parametrize("target", BUILT_MAKE_TARGETS)
+def test_built_target_is_not_still_a_stub(repo_root: pathlib.Path, target: str) -> None:
+    makefile = (repo_root / "Makefile").read_text()
+    body = makefile.split(f"\n{target}:")[1].split("\n.PHONY")[0]
+    assert "NOT_YET" not in body, f"`{target}` is built but still calls NOT_YET"
 
 
 def test_env_example_has_no_real_secrets(repo_root: pathlib.Path) -> None:

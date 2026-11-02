@@ -104,7 +104,7 @@ Built in vertical slices, so there is always something runnable
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **0** | Repo skeleton, 19 ADRs, backlog, CI, warehouse roles | **Complete** |
-| 1 | Inventory slice end to end, deployed live | Not started |
+| 1 | Inventory slice end to end, deployed live | **In progress** — generator done (BTB-10…BTB-13) |
 | 2 | All four source systems, 13 planted defects at volume | Not started |
 | 3 | Full star schema in dbt, plus a performance tuning study | Not started |
 | 4 | Reconciliations, evidence packs, access review, control matrix | Not started |
@@ -143,13 +143,16 @@ PostgreSQL 16.15):
 
 | Result | Command |
 | --- | --- |
-| 116 unit tests pass | `make test` |
+| 156 unit tests pass | `make test` |
 | 37 role-permission integration tests pass | `make init && .venv/bin/pytest -m integration` |
 | Lint clean: ruff check, ruff format, sqlfluff | `make lint` |
 | Warehouse starts healthy, 9 schemas created | `make up` |
 | `make roles` is idempotent — clean exit on a second run | `make roles && make roles` |
 | `reporter` is refused on `raw`, permitted on `reporting` | `.venv/bin/pytest -m integration -k reporter` |
-| CI green on `main`: lint + all 153 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
+| 8 synthetic extracts generated, byte-identical across runs | `make data` |
+| Subledger ties to GL to the cent, every period | `.venv/bin/pytest -k subledger_ties` |
+| Closing inventory = quantity × current standard cost, per material | `.venv/bin/pytest -k closing_value` |
+| CI green on `main`: lint + all 193 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
 | Direct push to `main` rejected: `GH006 ... protected branch hook declined` | `git commit --allow-empty -m "BTB-0: test" && git push origin main` |
 
 The role tests were also confirmed to **fail** when a privilege is deliberately

@@ -42,7 +42,6 @@ def test_demo_profile_is_smaller_than_full(cfg: genconfig.GeneratorConfig) -> No
         "purchase_order_lines",
         "production_orders",
         "mes_events",
-        "gl_postings",
     ):
         assert getattr(demo, field) < getattr(full, field), (
             f"demo.{field} is not smaller than full.{field}"

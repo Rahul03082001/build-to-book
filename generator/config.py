@@ -33,7 +33,6 @@ class Profile:
     purchase_order_lines: int
     production_orders: int
     mes_events: int
-    gl_postings: int
 
     @property
     def is_hosted(self) -> bool:
@@ -96,7 +95,6 @@ def load(path: pathlib.Path | None = None) -> GeneratorConfig:
             purchase_order_lines=int(body["purchase_order_lines"]),
             production_orders=int(body["production_orders"]),
             mes_events=int(body["mes_events"]),
-            gl_postings=int(body["gl_postings"]),
         )
 
     for expected in VALID_PROFILES:
