@@ -87,8 +87,12 @@ roles: ## Create warehouse roles and grants (warehouse/sql/roles.sql)
 psql: ## Open a psql shell on the warehouse
 	@scripts/psql.sh
 
+.PHONY: schemas
+schemas: roles raw-schema audit-schema ## Apply roles and all schemas to a running warehouse
+	@printf 'Schemas and roles up to date\n'
+
 .PHONY: init
-init: up roles ## Start the warehouse and apply roles
+init: up schemas ## Start the warehouse, then apply roles and schemas
 
 # ---------------------------------------------------------------------------
 # Pipeline
@@ -98,8 +102,18 @@ data: ## Generate synthetic source extracts + control totals
 	$(PY) -m generator --profile $(PROFILE) --seed $(SEED)
 
 .PHONY: load
-load: ## Validate and incrementally load extracts into raw  [PHASE 1]
-	$(call NOT_YET,Load data/ into raw with batch provenance,Phase 1 (BTB-14..BTB-17))
+load: ## Validate and incrementally load extracts into raw
+	$(PY) -m ingestion --data-dir $(or $(DATA_DIR),data)
+
+.PHONY: audit-schema
+audit-schema: ## Create the append-only audit tables
+	@scripts/psql.sh -q -f - < warehouse/sql/audit.sql
+	@printf 'Audit schema applied (append-only enforced)\n'
+
+.PHONY: raw-schema
+raw-schema: ## Create the raw landing tables
+	@scripts/psql.sh -q -f - < warehouse/sql/raw.sql
+	@printf 'Raw schema applied\n'
 
 .PHONY: build
 build: ## Run dbt build into the publish candidate schema  [PHASE 1]
