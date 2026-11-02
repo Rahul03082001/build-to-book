@@ -71,6 +71,11 @@ def accounting_document_numbers() -> NumberRange:
     return NumberRange(prefix="01", width=10)
 
 
+def bom_numbers() -> NumberRange:
+    """BOM numbers occupy the 00000xxxxx range, as SAP's STKO does."""
+    return NumberRange(prefix="", width=8, start=10_000_000)
+
+
 def revaluation_document_numbers() -> NumberRange:
     """Standard cost revaluation documents occupy 52xxxxxxxx, unique per year."""
     return NumberRange(prefix="52", width=10)

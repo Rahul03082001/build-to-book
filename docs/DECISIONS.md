@@ -41,6 +41,8 @@ SOX-style controls. Nothing here claims SOX compliance (ADR-019).
 | [ADR-021](#adr-021-publish-by-pointing-views-at-versioned-tables) | 2026-11-02 | Publish by pointing views at versioned tables | Accepted |
 | [ADR-022](#adr-022-control-totals-as-a-json-sidecar-per-extract) | 2026-11-02 | Control totals as a JSON sidecar per extract | Accepted |
 | [ADR-023](#adr-023-post-a-revaluation-when-a-standard-cost-changes) | 2026-11-02 | Post a revaluation when a standard cost changes | Accepted |
+| [ADR-024](#adr-024-keep-every-extract-as-csv-even-at-five-million-rows) | 2026-11-02 | Keep every extract as CSV, even at five million rows | Accepted |
+| [ADR-025](#adr-025-explode-the-bom-in-dbt-not-in-the-generator) | 2026-11-02 | Explode the BOM in dbt, not in the generator | Accepted |
 
 ---
 
@@ -1672,3 +1674,166 @@ invariant per material against the generator's own output.
 it. Both were confirmed to fail when the revaluation step is removed, and
 `docs/metric_definitions.md` records the inventory value definition that
 depends on it.
+
+---
+
+## ADR-024: Keep every extract as CSV, even at five million rows
+
+- Date: 2026-11-02
+- Status: Accepted
+- Jira: BTB-33 | PR/commit: BTB-30-bom-and-streaming-writer
+- Area: Data
+
+### Context
+
+The MES feed is the first extract where volume is a real consideration: the
+`full` profile calls for 5,000,000 unit-level events, against 20,000 purchase
+order lines for the whole year. As CSV that is roughly 575 MB in one file.
+
+Measured first rather than guessed: the `full` inventory slice generates
+243,041 rows in 0.8 seconds at 215 MB peak RSS — about 929 bytes per row held
+as Python dicts. Extrapolated to 5M events that is **~4.3 GB of RSS**, which
+is why the row counts forced a second decision about generation (see
+Consequences).
+
+### Options considered
+
+1. **CSV, like every other extract**: one code path through the loader, the
+   pandera schema and the control-totals sidecar. Con: largest on disk and
+   slowest to `COPY`.
+2. **Parquet for this one extract**: about 60 MB and far faster to read. Con: a
+   second branch in the loader and in validation, and the control-totals
+   sidecar loses much of its point because Parquet already carries row counts
+   in its footer. It also makes the `truncated_extract` defect hard to
+   simulate honestly — truncating a Parquet file corrupts it rather than
+   silently dropping rows.
+3. **Gzipped CSV**: about 80 MB with one logical format. Con: Postgres `COPY`
+   cannot read gzip, so the loader must stream-decompress; and the file hash
+   would cover the compressed bytes, which makes provenance subtly confusing
+   when someone recompresses the same data.
+
+### Decision
+
+Every extract stays plain CSV with a control-totals sidecar, including the
+5M-row MES feed.
+
+### Reasons
+
+Realism is the first reason and it is not cosmetic. ADR-002 models the
+extracts on what source systems actually export, and no ERP or MES writes a
+nightly Parquet file — they write flat files with trailer records. Two of the
+planted defects depend on that: `truncated_extract` works by silently dropping
+trailing rows, and `stale_extract` by leaving a file older than its window.
+Both are natural on a text file and contrived on a columnar one.
+
+Second, one code path. The loader, the pandera schemas, the sidecar contract
+and the file-hashing all work unchanged, so the high-volume extract is
+validated by exactly the same controls as the 60-row supplier master. A second
+format would mean a second set of things that can be wrong.
+
+Third, the cost is not real. 575 MB against 928 GB of free disk is nothing,
+and the Phase 3 tuning study measures *query* time against indexed Postgres
+tables — the CSV is read once per load and never again. Optimising the file
+format would speed up the part nobody is waiting on.
+
+### Consequences
+
+Easier: one format, one loader, one validation path, and the file-based defects
+stay realistic.
+
+Harder, and this is the real cost: 5M rows cannot be held in memory as Python
+dicts. Generation and writing must stream in chunks, which is a change to
+`generator/writers.py` — it currently takes a `Sequence` and sums the value
+column by iterating it twice. The writer now accepts an iterable of chunks and
+accumulates the row count, value total and SHA-256 incrementally, so peak
+memory is a function of chunk size rather than row count. BTB-36's acceptance
+criteria already required chunking, so this is implementation rather than a
+new decision — but it is what the format choice costs.
+
+`COPY` of 575 MB is also slower than reading 60 MB of Parquet. Accepted: the
+load happens once per run, and the loader already reads in chunks.
+
+### How a reviewer can verify it
+
+`generator/writers.py` streams chunks and reports peak memory independent of
+row count; the determinism test at volume (BTB-38) asserts the streamed output
+is byte-identical to the in-memory output for the demo profile, so the two
+paths cannot diverge.
+
+---
+
+## ADR-025: Explode the BOM in dbt, not in the generator
+
+- Date: 2026-11-02
+- Status: Accepted
+- Jira: BTB-30 | PR/commit: BTB-30-bom-and-streaming-writer
+- Area: Modeling
+
+### Context
+
+A rack configuration is built from sub-assemblies which are themselves built
+from components — a GPU tray holds GPUs, DIMMs and a PSU; a rack holds trays,
+NICs and cabling. Answering "how many DIMMs does this rack need?" requires
+exploding that structure and multiplying quantities down each path.
+
+The question is where the explosion happens: in the generator, or in the
+warehouse.
+
+### Options considered
+
+1. **Parent-child in `raw`, recursive CTE in an intermediate dbt model**: the
+   generator emits BOM header and item rows shaped like SAP's STKO and STPO,
+   and the warehouse explodes them. Con: a recursive CTE is the hardest model
+   in the project so far, and a cycle in the data would make it run forever.
+2. **Generator emits both the parent-child structure and a pre-exploded
+   extract**: no recursive SQL needed. Con: two sources of truth for the same
+   fact, and the explosion logic sits in Python where an auditor reviewing the
+   warehouse cannot see it. No real ERP exports a pre-exploded BOM nightly, so
+   the extract would be a fiction the rest of the project avoids.
+3. **Pre-exploded only**: simplest by a distance. Con: discards the level
+   structure that BTB-30 explicitly asks for. BOM depth becomes untestable,
+   "what goes into the GPU tray?" becomes unanswerable, and the unit-genealogy
+   work in Phase 3 loses the structure it builds on.
+
+### Decision
+
+The generator emits parent-child BOM headers and items only. An intermediate
+dbt model explodes them with a recursive CTE, multiplying quantities along
+each path and recording the level.
+
+### Reasons
+
+Keeping the explosion in SQL keeps it reviewable. The whole project rests on a
+transformation being readable in a pull request rather than inferred from
+Python (ADR-005), and the BOM explosion is the most consequential
+transformation in the warehouse — it decides every component requirement
+figure downstream. Putting it in the generator would hide exactly the logic
+most worth showing.
+
+It also keeps one source of truth. Option 2's two extracts would need a test
+asserting they agree, which is a test that exists only because of the
+duplication.
+
+And it preserves the level structure. A multi-level BOM is what makes
+sub-assembly questions answerable and what Phase 3's unit genealogy traverses;
+flattening it at the source would throw that away for a convenience the
+warehouse does not need.
+
+### Consequences
+
+Easier: component requirements derive from one reviewable model, BOM depth is
+queryable, and the structure matches what an ERP analyst expects to see.
+
+Harder: a recursive CTE needs a cycle guard, because a BOM that contains
+itself would recurse until the server stops it. The generator builds BOMs as a
+strict hierarchy so no cycle can exist, and a dbt test asserts acyclicity
+against the raw data rather than trusting the generator — the explosion model
+also caps recursion depth so a future bad extract fails fast instead of
+hanging a nightly run.
+
+### How a reviewer can verify it
+
+`raw.bom_items` holds parent-child rows only, with no exploded extract beside
+it. `int_bom_exploded` holds the recursion, and dbt tests assert no cycles, a
+bounded depth, and that exploding a known rack configuration yields the
+component quantities the generator put in.

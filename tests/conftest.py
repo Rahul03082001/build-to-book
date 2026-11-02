@@ -27,17 +27,16 @@ import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+
+def _load_order() -> tuple[str, ...]:
+    """The extract order, from the generator -- never a second copy."""
+    from generator import dataset
+
+    return dataset.LOAD_ORDER
+
+
 #: Masters before the documents that reference them.
-LOAD_ORDER = (
-    "materials",
-    "suppliers",
-    "standard_costs",
-    "purchase_order_headers",
-    "purchase_order_lines",
-    "goods_movements",
-    "inventory_revaluations",
-    "gl_postings",
-)
+LOAD_ORDER = _load_order()
 
 #: Fixed timestamp, so sidecars are reproducible across runs.
 EXTRACT_STAMP = dt.datetime(2026, 11, 2, 12, 0, 0)
@@ -54,19 +53,23 @@ def repo_root() -> pathlib.Path:
 def generate_extracts(out_dir: pathlib.Path, defect_keys: tuple[str, ...] = ()) -> dict[str, Any]:
     """Generate the demo extracts, planting the given defects. Returns the manifest."""
     from generator import config as genconfig
-    from generator import defects, inventory, writers
+    from generator import dataset, defects, writers
 
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg = genconfig.load()
-    generator = inventory.InventoryGenerator(cfg, "demo")
-    data = generator.generate()
+    # Built through dataset.build, not InventoryGenerator directly: this helper
+    # must produce every extract the loader expects. Generating only the
+    # inventory slice left the BOM extracts missing and the loader failed with
+    # "control totals missing for bom_headers.csv" -- a confusing symptom of a
+    # test helper that had not kept up with a new source system.
+    data, planted = dataset.build(cfg, "demo", defect_keys)
 
     manifest = defects.DefectManifest(seed=cfg.seed, profile="demo", generated_at=EXTRACT_STAMP)
-    for record in generator.inject_defects(data, defect_keys):
+    for record in planted:
         manifest.add(record)
 
     for name, rows in data.as_mapping().items():
-        writers.write_extract(inventory.EXTRACT_SPECS[name], rows, out_dir, EXTRACT_STAMP)
+        writers.write_extract(dataset.EXTRACT_SPECS[name], rows, out_dir, EXTRACT_STAMP)
     manifest.write(out_dir / "defects_manifest.json")
     return manifest.to_dict()
 

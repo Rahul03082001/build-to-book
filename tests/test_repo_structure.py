@@ -45,6 +45,8 @@ REQUIRED_FILES = [
     "generator/config.py",
     "generator/defects.py",
     "generator/injectors.py",
+    "generator/bom.py",
+    "generator/dataset.py",
     "generator/ids.py",
     "generator/inventory.py",
     "generator/writers.py",

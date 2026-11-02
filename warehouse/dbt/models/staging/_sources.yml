@@ -53,6 +53,34 @@ sources:
           - name: standard_cost_usd
             data_tests: [not_null]
 
+      - name: bom_headers
+        description: >
+          BOM headers, shaped on SAP's STKO. One row per BOM. Multi-level
+          structure is emergent: a component with its own header is a
+          sub-assembly (ADR-025).
+        columns:
+          - name: bom_number
+            data_tests: [unique, not_null]
+          - name: material_number
+            description: The parent material this BOM builds.
+            data_tests: [not_null]
+          - name: status
+            description: 01 means released for production.
+            data_tests: [not_null]
+
+      - name: bom_items
+        description: >
+          BOM items, shaped on SAP's STPO. One parent-child edge per row.
+          Nothing here resolves the hierarchy; int_bom_exploded does.
+        columns:
+          - name: bom_number
+            data_tests: [not_null]
+          - name: component_material_number
+            data_tests: [not_null]
+          - name: quantity_per
+            description: Component quantity per base quantity of the parent.
+            data_tests: [not_null]
+
       - name: purchase_order_headers
         description: Purchase order headers. One row per PO.
         columns:

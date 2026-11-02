@@ -25,16 +25,20 @@ import yaml
 DBT_DIR = pathlib.Path(__file__).resolve().parent.parent / "warehouse" / "dbt"
 MODELS_DIR = DBT_DIR / "models"
 
-EXPECTED_RAW_TABLES = {
-    "materials",
-    "suppliers",
-    "standard_costs",
-    "purchase_order_headers",
-    "purchase_order_lines",
-    "goods_movements",
-    "inventory_revaluations",
-    "gl_postings",
-}
+
+def _expected_raw_tables() -> set[str]:
+    """The raw tables, from the generator's own extract list.
+
+    Restated here once and it drifted immediately: Phase 2 added two extracts
+    and this test failed for the right reason with a confusing message.
+    Deriving it means a new source system is covered automatically.
+    """
+    from generator import dataset
+
+    return set(dataset.LOAD_ORDER)
+
+
+EXPECTED_RAW_TABLES = _expected_raw_tables()
 
 
 def _model_files() -> list[pathlib.Path]:
