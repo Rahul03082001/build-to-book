@@ -143,7 +143,7 @@ PostgreSQL 16.15):
 
 | Result | Command |
 | --- | --- |
-| 156 unit tests pass | `make test` |
+| 205 unit tests pass | `make test` |
 | 37 role-permission integration tests pass | `make init && .venv/bin/pytest -m integration` |
 | Lint clean: ruff check, ruff format, sqlfluff | `make lint` |
 | Warehouse starts healthy, 9 schemas created | `make up` |
@@ -154,9 +154,10 @@ PostgreSQL 16.15):
 | Rerun inserts 0 rows and reports 14,727 skipped | `make load && make load` |
 | Audit trail refuses UPDATE, DELETE **and** TRUNCATE | `.venv/bin/pytest -k refuses_modification` |
 | Source-side duplicate rejected while a rerun is skipped | `.venv/bin/pytest -k in_file_duplicate` |
+| A one-cent trailer mismatch is caught with the row count intact | `.venv/bin/pytest -k value_total` |
 | Subledger ties to GL to the cent, every period | `.venv/bin/pytest -k subledger_ties` |
 | Closing inventory = quantity × current standard cost, per material | `.venv/bin/pytest -k closing_value` |
-| CI green on `main`: lint + all 193 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
+| CI green on `main`: lint + all 269 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
 | Direct push to `main` rejected: `GH006 ... protected branch hook declined` | `git commit --allow-empty -m "BTB-0: test" && git push origin main` |
 
 The role tests were also confirmed to **fail** when a privilege is deliberately

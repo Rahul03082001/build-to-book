@@ -133,20 +133,65 @@ class LoadResult:
     ended_at: dt.datetime | None = None
     status: str = "running"
     failure_reason: str | None = None
+    # Summed from the file's own rows, for comparison against the declared
+    # trailer total. None when the extract carries no monetary column.
+    value_total_in_file: decimal.Decimal | None = None
 
     @property
-    def completeness_ok(self) -> bool:
+    def rows_accounted_ok(self) -> bool:
         """Whether every row the source declared is accounted for.
 
         Inserted + skipped + rejected must equal the declared row count. A
-        shortfall means rows vanished between the file and the warehouse, which
-        is what CTRL-001 exists to catch.
+        shortfall means rows vanished between the file and the warehouse.
         """
         if self.control_total_rows is None:
             return True
         return (
             self.rows_inserted + self.rows_skipped + self.rows_rejected == self.control_total_rows
         )
+
+    @property
+    def value_total_ok(self) -> bool:
+        """Whether the file's value column sums to the declared trailer total.
+
+        Row counts alone miss a whole class of fault: a row whose amount was
+        altered in transit keeps the count intact and changes the money. This
+        is the half of CTRL-001 that catches it, and it was missing until the
+        control matrix was checked against what the loader actually did.
+
+        Compared exactly, not within a tolerance. Both sides are
+        two-decimal-place decimals by construction -- the writer refuses
+        anything else -- so any difference is a real one.
+        """
+        if self.control_total_value is None or self.value_total_in_file is None:
+            return True
+        return self.value_total_in_file == self.control_total_value
+
+    @property
+    def completeness_ok(self) -> bool:
+        """CTRL-001: both row counts and value totals reconcile to the trailer."""
+        return self.rows_accounted_ok and self.value_total_ok
+
+    @property
+    def completeness_detail(self) -> str:
+        """Why completeness failed, for the operator and the audit trail."""
+        problems = []
+        if not self.rows_accounted_ok:
+            accounted = self.rows_inserted + self.rows_skipped + self.rows_rejected
+            problems.append(
+                f"row count: {self.rows_inserted} inserted + {self.rows_skipped} skipped "
+                f"+ {self.rows_rejected} rejected = {accounted}, but the source "
+                f"declared {self.control_total_rows}"
+            )
+        if not self.value_total_ok:
+            assert self.value_total_in_file is not None
+            assert self.control_total_value is not None
+            problems.append(
+                f"value total: the file sums to {self.value_total_in_file} but the "
+                f"source declared {self.control_total_value} (difference "
+                f"{self.value_total_in_file - self.control_total_value})"
+            )
+        return "; ".join(problems)
 
 
 def _staging_table(extract_name: str, batch_id: str) -> sql.Identifier:
@@ -459,6 +504,22 @@ def load_extract(
     rows_in_file = len(raw_frame)
 
     control_total_value = control_totals.get("value_total")
+
+    # Sum the declared value column from the file's own rows -- every parsed
+    # row, including any later rejected, because the trailer describes the file
+    # as it arrived rather than what survived validation.
+    value_column = control_totals.get("value_column")
+    value_total_in_file: decimal.Decimal | None = None
+    if value_column and value_column in raw_frame.columns:
+        value_total_in_file = sum(
+            (
+                decimal.Decimal(str(value))
+                for value in raw_frame[value_column]
+                if value is not None and str(value) not in ("", "nan")
+            ),
+            decimal.Decimal("0"),
+        )
+
     result = LoadResult(
         run_id=run_id,
         batch_id=batch_id,
@@ -475,6 +536,7 @@ def load_extract(
             decimal.Decimal(control_total_value) if control_total_value is not None else None
         ),
         started_at=started_at,
+        value_total_in_file=value_total_in_file,
     )
 
     staging = _staging_table(extract_name, batch_id)
