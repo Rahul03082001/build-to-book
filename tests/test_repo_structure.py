@@ -51,6 +51,11 @@ REQUIRED_FILES = [
     "warehouse/sql/roles.sql",
     "warehouse/sql/raw.sql",
     "warehouse/sql/audit.sql",
+    "warehouse/sql/controls.sql",
+    "controls/checks.py",
+    "controls/runner.py",
+    "controls/publish.py",
+    "controls/__main__.py",
     "ingestion/schemas.py",
     "ingestion/loader.py",
     "ingestion/db.py",
@@ -114,7 +119,7 @@ def test_makefile_declares_target(repo_root: pathlib.Path, target: str) -> None:
 
 # Targets whose phase has landed. A built target that quietly reverts to a stub
 # would otherwise still pass the declaration test above.
-BUILT_MAKE_TARGETS = ["data", "load", "build"]
+BUILT_MAKE_TARGETS = ["data", "load", "build", "controls", "publish"]
 
 
 @pytest.mark.parametrize("target", BUILT_MAKE_TARGETS)

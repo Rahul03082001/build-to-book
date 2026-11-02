@@ -1379,6 +1379,29 @@ reported, with the count matching `defects_manifest.json`.
 - Jira: BTB-23 | PR/commit: BTB-9-phase-1-decisions
 - Area: Controls
 
+> **Amendment 2026-11-02, from implementing it (BTB-23).** The decision below
+> stands -- versioned tables in `reporting` with a stable view per mart -- but
+> two details of it were wrong in practice. The original reasoning is left
+> intact rather than rewritten.
+>
+> **1. dbt does not build the versioned tables; the gate copies them.** This
+> ADR said marts build *as* versioned tables in `reporting`. dbt model names
+> are static, so that needs a per-run alias macro, and it would put a
+> half-finished build inside the schema the dashboard reads. Instead dbt builds
+> static-named marts in `marts`, and the gate copies each one into `reporting`
+> under a versioned name. Same guarantees, and the build never touches
+> `reporting` until the checks have passed.
+>
+> **2. Versions are named per publish attempt, not per batch.** Naming a
+> version after the batch breaks on a republish: the versioned table is the one
+> the live view depends on, so copying over it fails with
+> `DependentObjectsStillExist`. Republishing is routine -- the nightly job
+> retries and `make publish` gets rerun by hand. Dropping the view first would
+> resolve the dependency but hold a lock on it for the whole copy, stalling
+> every reader exactly while a publish is in flight. A fresh table per attempt
+> avoids it, and `audit.publish_log` holds the batch-to-version mapping, so
+> traceability lives in the audit trail rather than in a table name.
+
 ### Context
 
 [ADR-014](#adr-014-publish-by-swapping-a-validated-build-into-reporting)
