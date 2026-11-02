@@ -131,8 +131,10 @@ importer.
   expected to catch it and whether that control is preventive or detective.
 - **CI that gates every change** — lint, tests, and a check that fails a pull
   request whose title carries no Jira key.
-- **[Branch protection runbook](docs/branch_protection.md)** — with the
-  segregation-of-duties limitation stated plainly rather than disguised.
+- **[Branch protection runbook](docs/branch_protection.md)** — applied and
+  verified on `main`: pull requests required, all three CI checks required,
+  admins included so there is no bypass, and the segregation-of-duties
+  limitation stated plainly rather than disguised.
 
 ### Verified on this machine
 
@@ -148,6 +150,7 @@ PostgreSQL 16.15):
 | `make roles` is idempotent — clean exit on a second run | `make roles && make roles` |
 | `reporter` is refused on `raw`, permitted on `reporting` | `.venv/bin/pytest -m integration -k reporter` |
 | CI green on `main`: lint + all 153 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
+| Direct push to `main` rejected: `GH006 ... protected branch hook declined` | `git commit --allow-empty -m "BTB-0: test" && git push origin main` |
 
 The role tests were also confirmed to **fail** when a privilege is deliberately
 leaked (`grant usage on schema raw to btb_reporter`) and to pass again once it
