@@ -12,11 +12,12 @@ with joined as (
     select
         f.goods_movement_key,
         count(*) as dimension_versions_matched
-    from {{ ref('fct_goods_movements') }} f
-    inner join {{ ref('dim_material') }} d
-        on  d.material_number = f.material_number
-        and f.posting_date between d.valid_from and d.valid_to
-    group by 1
+    from {{ ref('fct_goods_movements') }} as f
+    inner join {{ ref('dim_material') }} as d
+        on
+            f.material_number = d.material_number
+            and f.posting_date between d.valid_from and d.valid_to
+    group by f.goods_movement_key
 )
 
 select

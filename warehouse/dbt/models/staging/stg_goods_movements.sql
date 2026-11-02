@@ -16,24 +16,24 @@ select
     case movement_type
         when '101' then 'RECEIPT'
         when '261' then 'ISSUE'
-    end                                as movement_direction,
+    end                              as movement_direction,
     material_number,
-    plant                              as plant_code,
+    plant                            as plant_code,
     -- Already signed at source by movement type: receipts positive, issues
     -- negative.
     quantity,
-    upper(trim(uom))                   as unit_of_measure,
+    upper(trim(uom))                 as unit_of_measure,
     amount_usd,
     -- Posting date is the reporting basis; document date is when the
     -- paperwork was raised (docs/metric_definitions.md).
     posting_date,
     document_date,
-    to_char(posting_date, 'YYYY-MM')   as posting_period,
+    to_char(posting_date, 'YYYY-MM') as posting_period,
     po_number,
     po_item,
     entered_by,
-    _batch_id                          as batch_id,
-    _source_file                       as source_file,
-    _file_sha256                       as source_file_sha256,
-    _loaded_at                         as loaded_at
+    _batch_id                        as batch_id,
+    _source_file                     as source_file,
+    _file_sha256                     as source_file_sha256,
+    _loaded_at                       as loaded_at
 from source

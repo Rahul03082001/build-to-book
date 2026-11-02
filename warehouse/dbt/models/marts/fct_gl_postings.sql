@@ -3,7 +3,7 @@
 select
     {{ dbt_utils.generate_surrogate_key([
         'accounting_document', 'fiscal_year', 'line_item'
-    ]) }}                                  as gl_posting_key,
+    ]) }} as gl_posting_key,
     accounting_document,
     line_item,
     fiscal_year,

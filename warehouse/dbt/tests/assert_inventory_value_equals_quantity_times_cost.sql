@@ -16,9 +16,11 @@ with balances as (
         b.closing_quantity,
         b.closing_value_usd,
         -- Last day of the period, which is the as-of date for valuation.
-        (date_trunc('month', to_date(b.posting_period, 'YYYY-MM'))
-            + interval '1 month - 1 day')::date as period_end
-    from {{ ref('mart_inventory_balance') }} b
+        (
+            date_trunc('month', to_date(b.posting_period, 'YYYY-MM'))
+            + interval '1 month - 1 day'
+        )::date as period_end
+    from {{ ref('mart_inventory_balance') }} as b
 ),
 
 valued as (
@@ -26,8 +28,8 @@ valued as (
         balances.*,
         m.standard_cost_usd as cost_in_force
     from balances
-    inner join {{ ref('dim_material') }} m
-        on  m.material_number = balances.material_number
+    inner join {{ ref('dim_material') }} as m
+        on m.material_number = balances.material_number
         -- As-of join: exactly one cost window covers any date (ADR-007).
         and balances.period_end between m.valid_from and m.valid_to
 )
@@ -38,7 +40,7 @@ select
     closing_quantity,
     closing_value_usd,
     cost_in_force,
-    round(closing_quantity * cost_in_force, 2) as expected_value_usd,
+    round(closing_quantity * cost_in_force, 2)                     as expected_value_usd,
     closing_value_usd - round(closing_quantity * cost_in_force, 2) as difference_usd
 from valued
 where closing_value_usd <> round(closing_quantity * cost_in_force, 2)

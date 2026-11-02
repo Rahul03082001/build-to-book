@@ -14,7 +14,7 @@ with movements as (
 select
     {{ dbt_utils.generate_surrogate_key([
         'material_document', 'fiscal_year', 'material_document_item'
-    ]) }}                                  as goods_movement_key,
+    ]) }} as goods_movement_key,
 
     -- Degenerate dimensions: the document identity itself.
     material_document,

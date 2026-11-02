@@ -171,7 +171,7 @@ lint: ## Lint Python (ruff) and SQL (sqlfluff)
 	$(RUFF) check .
 	$(RUFF) format --check .
 	@if [ -n "$$(find $(DBT_DIR)/models -name '*.sql' -print -quit 2>/dev/null)" ]; then \
-		$(SQLFLUFF) lint $(DBT_DIR)/models; \
+		$(SQLFLUFF) lint $(DBT_DIR)/models $(DBT_DIR)/tests; \
 	else \
 		printf 'sqlfluff: no dbt models yet, skipping\n'; \
 	fi

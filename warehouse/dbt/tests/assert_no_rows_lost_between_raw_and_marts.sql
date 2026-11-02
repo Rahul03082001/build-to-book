@@ -17,9 +17,10 @@ distinct_keys as (
 )
 
 select
-    raw_count.n  as raw_rows,
-    fact_count.n as fact_rows,
+    raw_count.n     as raw_rows,
+    fact_count.n    as fact_rows,
     distinct_keys.n as distinct_fact_keys
 from raw_count, fact_count, distinct_keys
-where raw_count.n <> fact_count.n
-   or fact_count.n <> distinct_keys.n
+where
+    raw_count.n <> fact_count.n
+    or fact_count.n <> distinct_keys.n

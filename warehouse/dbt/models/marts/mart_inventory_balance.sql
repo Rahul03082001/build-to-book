@@ -27,8 +27,9 @@
 -- share -- which is exactly how a negative inventory value survived it once.
 
 with periods as (
-    select distinct posting_period from {{ ref('dim_date') }} d
-    inner join {{ ref('fct_goods_movements') }} f on f.posting_period = d.period
+    select distinct f.posting_period
+    from {{ ref('dim_date') }} as d
+    inner join {{ ref('fct_goods_movements') }} as f on d.period = f.posting_period
 ),
 
 -- Every material x period combination, so a period in which a material did
@@ -39,27 +40,27 @@ scaffold as (
     select
         m.material_number,
         p.posting_period
-    from (select distinct material_number from {{ ref('fct_goods_movements') }}) m
-    cross join periods p
+    from (select distinct material_number from {{ ref('fct_goods_movements') }}) as m
+    cross join periods as p
 ),
 
 movement_by_period as (
     select
         material_number,
         posting_period,
-        sum(quantity)                                              as movement_quantity,
-        sum(amount_usd)                                            as movement_value_usd,
+        sum(quantity)   as movement_quantity,
+        sum(amount_usd) as movement_value_usd,
         sum(case when movement_direction = 'RECEIPT' then quantity else 0 end)
-                                                                   as receipt_quantity,
+            as receipt_quantity,
         sum(case when movement_direction = 'RECEIPT' then amount_usd else 0 end)
-                                                                   as receipt_value_usd,
+            as receipt_value_usd,
         sum(case when movement_direction = 'ISSUE' then -quantity else 0 end)
-                                                                   as issue_quantity,
+            as issue_quantity,
         sum(case when movement_direction = 'ISSUE' then -amount_usd else 0 end)
-                                                                   as issue_value_usd,
-        count(*)                                                   as movement_line_count
+            as issue_value_usd,
+        count(*)        as movement_line_count
     from {{ ref('fct_goods_movements') }}
-    group by 1, 2
+    group by material_number, posting_period
 ),
 
 revaluation_by_period as (
@@ -69,29 +70,31 @@ revaluation_by_period as (
         sum(amount_usd) as revaluation_value_usd,
         count(*)        as revaluation_count
     from {{ ref('fct_inventory_revaluations') }}
-    group by 1, 2
+    group by material_number, posting_period
 ),
 
 combined as (
     select
         s.material_number,
         s.posting_period,
-        coalesce(m.movement_quantity, 0)                as movement_quantity,
-        coalesce(m.movement_value_usd, 0)               as movement_value_usd,
-        coalesce(m.receipt_quantity, 0)                 as receipt_quantity,
-        coalesce(m.receipt_value_usd, 0)                as receipt_value_usd,
-        coalesce(m.issue_quantity, 0)                   as issue_quantity,
-        coalesce(m.issue_value_usd, 0)                  as issue_value_usd,
-        coalesce(m.movement_line_count, 0)              as movement_line_count,
-        coalesce(r.revaluation_value_usd, 0)            as revaluation_value_usd,
-        coalesce(r.revaluation_count, 0)                as revaluation_count
-    from scaffold s
-    left join movement_by_period m
-        on  m.material_number = s.material_number
-        and m.posting_period = s.posting_period
-    left join revaluation_by_period r
-        on  r.material_number = s.material_number
-        and r.posting_period = s.posting_period
+        coalesce(m.movement_quantity, 0)     as movement_quantity,
+        coalesce(m.movement_value_usd, 0)    as movement_value_usd,
+        coalesce(m.receipt_quantity, 0)      as receipt_quantity,
+        coalesce(m.receipt_value_usd, 0)     as receipt_value_usd,
+        coalesce(m.issue_quantity, 0)        as issue_quantity,
+        coalesce(m.issue_value_usd, 0)       as issue_value_usd,
+        coalesce(m.movement_line_count, 0)   as movement_line_count,
+        coalesce(r.revaluation_value_usd, 0) as revaluation_value_usd,
+        coalesce(r.revaluation_count, 0)     as revaluation_count
+    from scaffold as s
+    left join movement_by_period as m
+        on
+            s.material_number = m.material_number
+            and s.posting_period = m.posting_period
+    left join revaluation_by_period as r
+        on
+            s.material_number = r.material_number
+            and s.posting_period = r.posting_period
 ),
 
 running as (
@@ -107,10 +110,10 @@ running as (
         movement_line_count,
         revaluation_value_usd,
         revaluation_count,
-        movement_value_usd + revaluation_value_usd as period_value_change_usd,
-        sum(movement_quantity) over material_to_date  as closing_quantity,
+        movement_value_usd + revaluation_value_usd   as period_value_change_usd,
+        sum(movement_quantity) over material_to_date as closing_quantity,
         sum(movement_value_usd + revaluation_value_usd) over material_to_date
-                                                      as closing_value_usd
+            as closing_value_usd
     from combined
     window material_to_date as (
         partition by material_number
@@ -147,12 +150,12 @@ select
 
     -- Opening position, for a reader who wants the movement to reconcile:
     -- opening + change = closing.
-    r.closing_quantity - r.movement_quantity                as opening_quantity,
-    r.closing_value_usd - r.period_value_change_usd          as opening_value_usd,
+    r.closing_quantity - r.movement_quantity        as opening_quantity,
+    r.closing_value_usd - r.period_value_change_usd as opening_value_usd,
 
     -- Exception flag for the Inventory dashboard page. Physically impossible,
     -- so clean data never sets it (CTRL-010).
-    r.closing_quantity < 0                                   as is_negative_on_hand
-from running r
-inner join {{ ref('dim_material_current') }} d
-    on d.material_number = r.material_number
+    r.closing_quantity < 0                          as is_negative_on_hand
+from running as r
+inner join {{ ref('dim_material_current') }} as d
+    on r.material_number = d.material_number

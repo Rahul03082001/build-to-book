@@ -8,39 +8,47 @@
 -- money guards in the generator and loader exist to prevent; a real
 -- materiality threshold is a separate decision (ADR-010).
 with movements as (
-    select posting_period, sum(amount_usd) as amount_usd
+    select
+        posting_period,
+        sum(amount_usd) as amount_usd
     from {{ ref('fct_goods_movements') }}
-    group by 1
+    group by posting_period
 ),
 
 revaluations as (
-    select posting_period, sum(amount_usd) as amount_usd
+    select
+        posting_period,
+        sum(amount_usd) as amount_usd
     from {{ ref('fct_inventory_revaluations') }}
-    group by 1
+    group by posting_period
 ),
 
 subledger as (
-    select posting_period, sum(amount_usd) as subledger_usd
+    select
+        posting_period,
+        sum(amount_usd) as subledger_usd
     from (
         select * from movements
         union all
         select * from revaluations
-    ) combined
-    group by 1
+    ) as combined
+    group by posting_period
 ),
 
 ledger as (
-    select posting_period, sum(signed_amount_usd) as ledger_usd
+    select
+        posting_period,
+        sum(signed_amount_usd) as ledger_usd
     from {{ ref('fct_gl_postings') }}
     where gl_account = '130000'
-    group by 1
+    group by posting_period
 )
 
 select
-    coalesce(s.posting_period, l.posting_period) as posting_period,
+    coalesce(s.posting_period, l.posting_period)             as posting_period,
     s.subledger_usd,
     l.ledger_usd,
     coalesce(s.subledger_usd, 0) - coalesce(l.ledger_usd, 0) as difference_usd
-from subledger s
-full outer join ledger l on l.posting_period = s.posting_period
+from subledger as s
+full outer join ledger as l on s.posting_period = l.posting_period
 where coalesce(s.subledger_usd, 0) <> coalesce(l.ledger_usd, 0)
