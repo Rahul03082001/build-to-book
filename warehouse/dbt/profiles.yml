@@ -1,0 +1,51 @@
+# dbt connection profiles.
+#
+# Credentials come from the environment -- never commit a password here.
+# `local` is docker compose, `ci` is the GitHub Actions service container,
+# `hosted` is the free-tier demo database.
+#
+# dbt looks for this file in ~/.dbt by default; the Makefile passes
+# --profiles-dir warehouse/dbt so the committed version is used.
+
+build_to_book:
+  target: local
+
+  outputs:
+    local:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | int }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'btb') }}"
+      user: "{{ env_var('POSTGRES_USER', 'btb_admin') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD') }}"
+      schema: "{{ env_var('BTB_TARGET_SCHEMA', 'publish_candidate') }}"
+      threads: 4
+      keepalives_idle: 0
+      sslmode: prefer
+
+    ci:
+      type: postgres
+      host: localhost
+      port: 5432
+      dbname: btb
+      user: btb_admin
+      password: "{{ env_var('POSTGRES_PASSWORD') }}"
+      schema: publish_candidate
+      threads: 4
+      sslmode: disable
+
+    hosted:
+      type: postgres
+      # One DSN as a secret, so the hosted credentials are never assembled
+      # from separate variables in a log line.
+      host: "{{ env_var('BTB_HOSTED_HOST') }}"
+      port: "{{ env_var('BTB_HOSTED_PORT', '5432') | int }}"
+      dbname: "{{ env_var('BTB_HOSTED_DB') }}"
+      user: "{{ env_var('BTB_HOSTED_USER') }}"
+      password: "{{ env_var('BTB_HOSTED_PASSWORD') }}"
+      schema: publish_candidate
+      # Free-tier compute autoscales to 2 CU and suspends when idle; a high
+      # thread count just queues (ADR-015).
+      threads: 2
+      sslmode: require
+      connect_timeout: 30

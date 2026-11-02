@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets and local config
+.env
+.env.local
+*.pem
+
+# dbt
+warehouse/dbt/target/
+warehouse/dbt/dbt_packages/
+warehouse/dbt/logs/
+.user.yml
+
+# Generated data (regenerate with `make data`)
+data/
+generator/out/
+
+# Generated evidence packs -- keep the committed samples only
+evidence/*
+!evidence/.gitkeep
+!evidence/samples/
+!evidence/samples/**
+
+# Certified exports (regenerate with `make export`)
+exports/*
+!exports/.gitkeep
+
+# Dashboards: keep screenshots and workbooks, drop local extracts
+dashboards/*.hyper
+dashboards/*.tde
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# The build prompt lives outside version control
+BUILD_PROMPT.md

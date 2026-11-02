@@ -1,0 +1,68 @@
+name: build_to_book
+version: "0.1.0"
+config-version: 2
+
+profile: build_to_book
+
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+# Fail rather than guess. A model that references a column that no longer
+# exists should break the build, not silently produce nulls.
+flags:
+  send_anonymous_usage_stats: false
+  require_explicit_package_overrides_for_builtin_materializations: true
+  source_freshness_run_project_hooks: true
+
+models:
+  build_to_book:
+    +persist_docs:
+      # Column descriptions end up as COMMENT ON in Postgres, so the warehouse
+      # itself carries the data dictionary -- not just the generated docs site.
+      relation: true
+      columns: true
+
+    staging:
+      +schema: staging
+      +materialized: view
+      # Staging is rename/cast/standardise only. Views keep it cheap and make
+      # it obvious that no business logic belongs here.
+
+    intermediate:
+      +schema: intermediate
+      +materialized: ephemeral
+      # Ephemeral by default: intermediate models are build-time plumbing, not
+      # objects a consumer should query. Promote to table where a CTE gets too
+      # large to plan well.
+
+    marts:
+      +schema: marts
+      +materialized: table
+      # Marts are what the publish gate swaps into reporting, so they must be
+      # real tables.
+
+snapshots:
+  build_to_book:
+    +target_schema: snapshots
+    # SCD Type 2 on material master and standard cost (ADR-007).
+    +strategy: check
+    +invalidate_hard_deletes: true
+
+seeds:
+  build_to_book:
+    +schema: seeds
+    +quote_columns: false
+
+tests:
+  build_to_book:
+    # A failing test must stop the build, not warn. A warned-about test result
+    # has the same practical effect as no test (ADR-010).
+    +severity: error
+    +store_failures: true
+    +schema: dbt_test_failures

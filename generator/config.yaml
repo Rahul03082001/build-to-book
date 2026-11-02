@@ -1,0 +1,216 @@
+# Synthetic data generation for Build-to-Book.
+#
+# ALL DATA PRODUCED FROM THIS CONFIG IS SYNTHETIC (ADR-001, ADR-019).
+# It simulates a rack-scale server manufacturer (ADR-003) with SAP-style ERP
+# structures (ADR-002). No real company, supplier, price, or person appears.
+#
+# Two profiles (ADR-016): `demo` is small enough for the hosted free-tier
+# database; `full` carries the volume the Phase 3 tuning study needs and runs
+# only on a laptop.
+
+# ---------------------------------------------------------------------------
+# Determinism. The same seed must reproduce byte-identical extracts, because
+# the defect tests assert on exact injected records.
+# ---------------------------------------------------------------------------
+seed: 20261101
+
+profiles:
+  demo:
+    description: Small hosted profile for the live demo. Fits the free-tier storage cap.
+    months: 3
+    period_start: "2026-08-01"
+    materials: 60
+    suppliers: 12
+    rack_configurations: 4
+    purchase_order_lines: 1200
+    production_orders: 400
+    mes_events: 60000
+    gl_postings: 9000
+
+  full:
+    description: Local profile for the performance tuning study. Not hosted.
+    months: 12
+    period_start: "2025-11-01"
+    materials: 300
+    suppliers: 40
+    rack_configurations: 6
+    purchase_order_lines: 20000
+    production_orders: 8000
+    mes_events: 5000000
+    gl_postings: 400000
+
+# ---------------------------------------------------------------------------
+# Business domain. Component classes mirror a rack-scale server build.
+# ---------------------------------------------------------------------------
+domain:
+  material_groups:
+    - GPU
+    - CPU
+    - DIMM
+    - NVME
+    - PSU
+    - NIC
+    - CHASSIS
+    - CABLE
+    - RACK_ASSY
+
+  # MES route. Every serial walks these steps in order; burn-in is where a
+  # rack-scale manufacturer actually finds failures, so it carries the
+  # highest failure rate and the rework loops.
+  mes_steps:
+    - name: assembly
+      station_count: 6
+      failure_rate: 0.010
+    - name: firmware_flash
+      station_count: 3
+      failure_rate: 0.020
+    - name: burn_in
+      station_count: 8
+      failure_rate: 0.055
+      duration_hours: 12
+    - name: final_test
+      station_count: 4
+      failure_rate: 0.015
+
+  failure_codes:
+    - THERMAL_TRIP
+    - DIMM_ECC
+    - GPU_LINK_DOWN
+    - FW_CHECKSUM
+    - PSU_RIPPLE
+    - NIC_NO_LINK
+    - NVME_SMART_FAIL
+
+  # Maximum rework attempts before a unit is scrapped. Bounded so unit
+  # genealogy in Phase 3 stays finite.
+  max_rework_attempts: 2
+
+  currency: USD
+  uom_default: EA
+
+# ---------------------------------------------------------------------------
+# Period close. Postings dated into a closed period are a control violation,
+# not a data quirk -- see the backdated_gl_posting defect.
+# ---------------------------------------------------------------------------
+close_calendar:
+  # Business days after period end when the period locks.
+  close_lag_days: 5
+
+# ---------------------------------------------------------------------------
+# Source extract freshness windows, in hours. A source older than its window
+# is stale and blocks publishing of the metrics it feeds (Phase 4).
+# ---------------------------------------------------------------------------
+freshness_hours:
+  erp_material_master: 48
+  erp_purchase_orders: 24
+  erp_goods_movements: 24
+  erp_production_orders: 24
+  erp_standard_costs: 168
+  mes_unit_events: 12
+  supply_chain_shipments: 24
+  finance_gl_postings: 24
+  finance_trial_balance: 168
+
+# ---------------------------------------------------------------------------
+# Defect injection (Phase 2). Every switch defaults to false: with defects
+# off, the subledger ties to the GL and every receipt matches a PO.
+#
+# Each injected record is written to defects_manifest.json so a test can
+# assert that the control caught exactly what was planted -- no more, no less.
+#
+# `count` is the number of records to corrupt. Keep counts small and odd-ish
+# so an off-by-one in a control is visible.
+# ---------------------------------------------------------------------------
+defects:
+  duplicate_goods_receipt:
+    enabled: false
+    count: 3
+    simulates: An interface retry posting the same goods receipt twice.
+    phase: 1
+
+  backdated_gl_posting:
+    enabled: false
+    count: 2
+    simulates: A journal entry posted into an already-closed period.
+    phase: 1
+
+  late_arriving_mes_events:
+    enabled: false
+    count: 25
+    days_late: 7
+    simulates: MES events landing after the period they belong to was closed.
+    phase: 2
+
+  uom_mismatch:
+    enabled: false
+    count: 1
+    simulates: One component received in boxes of 10 but recorded as each.
+    phase: 2
+
+  orphaned_po_lines:
+    enabled: false
+    count: 4
+    simulates: PO lines whose header row is missing from the extract.
+    phase: 2
+
+  receipt_without_po:
+    enabled: false
+    count: 3
+    simulates: An unmatched goods receipt that breaks the three-way match.
+    phase: 2
+
+  invoice_price_outlier:
+    enabled: false
+    count: 2
+    multiplier: 4.5
+    simulates: A supplier invoice priced far above the PO price.
+    phase: 2
+
+  unapproved_standard_cost_change:
+    enabled: false
+    count: 2
+    simulates: A mid-period standard cost change with no approval record.
+    phase: 2
+
+  mes_erp_completion_gap:
+    enabled: false
+    count: 15
+    simulates: Units that passed final test but were never confirmed in ERP.
+    phase: 2
+
+  missing_supplier_on_shipment:
+    enabled: false
+    count: 5
+    simulates: A null supplier foreign key on the supply chain feed.
+    phase: 2
+
+  truncated_extract:
+    enabled: false
+    target: erp_goods_movements
+    drop_fraction: 0.02
+    simulates: A source file whose trailing rows were silently dropped.
+    phase: 2
+
+  stale_extract:
+    enabled: false
+    target: mes_unit_events
+    age_hours: 72
+    simulates: A source file older than its expected refresh window.
+    phase: 2
+
+  negative_on_hand:
+    enabled: false
+    count: 2
+    simulates: A goods issue posted before the receipt that covers it.
+    phase: 2
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+output:
+  directory: data
+  # Written beside every extract, mimicking a source-system trailer record:
+  # row count and value total, so completeness can be checked at load.
+  control_totals_suffix: .control_totals.json
+  manifest_filename: defects_manifest.json
+  format: csv

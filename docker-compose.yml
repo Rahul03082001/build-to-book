@@ -1,0 +1,48 @@
+# Local warehouse for Build-to-Book.
+#   docker compose up -d   then   make init
+#
+# PostgreSQL 16 matches ADR-004. The managed free-tier instance used for the
+# live demo runs the same major version so local and hosted behaviour agree.
+
+services:
+  warehouse:
+    image: postgres:16-alpine
+    container_name: btb-warehouse
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-btb}
+      POSTGRES_USER: ${POSTGRES_USER:-btb_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_locally}
+      # Deterministic sort order so reconciliation checks are reproducible
+      # across a laptop and CI.
+      LANG: C
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - btb_pgdata:/var/lib/postgresql/data
+      - ./warehouse/sql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-btb_admin} -d ${POSTGRES_DB:-btb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # The full profile (5M+ MES events) needs more working memory than the
+    # Postgres defaults for the tuning study in Phase 3.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=32MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_min_duration_statement=1000
+
+volumes:
+  btb_pgdata:
+    name: btb_pgdata

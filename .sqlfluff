@@ -1,0 +1,33 @@
+[sqlfluff]
+dialect = postgres
+templater = jinja
+max_line_length = 100
+exclude_rules = structure.column_order, references.consistent
+
+[sqlfluff:indentation]
+indented_joins = false
+indented_ctes = false
+tab_space_size = 4
+
+[sqlfluff:templater:jinja]
+apply_dbt_builtins = true
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.identifiers]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.functions]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:aliasing.table]
+aliasing = explicit
+
+[sqlfluff:rules:aliasing.column]
+aliasing = explicit
+
+# Grain and provenance columns must be spelled out, so `select *` is banned
+# in models -- lineage cannot resolve a star to source columns (ADR-009).
+[sqlfluff:rules:ambiguous.column_references]
+group_by_and_order_by_style = explicit
