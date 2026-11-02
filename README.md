@@ -3,6 +3,8 @@
 **Manufacturing data pipeline and inventory reconciliation, with end-to-end
 lineage and simulated SOX-style controls.**
 
+[![CI](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml/badge.svg)](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml)
+
 > ### Synthetic data, simulated controls
 > All data in this project is **synthetic**, produced by the generator in
 > [`generator/`](generator/). All controls are **simulated, SOX-style**
@@ -145,6 +147,7 @@ PostgreSQL 16.15):
 | Warehouse starts healthy, 9 schemas created | `make up` |
 | `make roles` is idempotent — clean exit on a second run | `make roles && make roles` |
 | `reporter` is refused on `raw`, permitted on `reporting` | `.venv/bin/pytest -m integration -k reporter` |
+| CI green on `main`: lint + all 153 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
 
 The role tests were also confirmed to **fail** when a privilege is deliberately
 leaked (`grant usage on schema raw to btb_reporter`) and to pass again once it
