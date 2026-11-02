@@ -1,0 +1,83 @@
+# Manual failure demonstration (BTB-67).
+#
+# Pick a defect, run the pipeline against the `sandbox` schema, and watch the
+# publish get blocked while the live `reporting` dataset stays untouched. This
+# is step 5 of the five-minute demo script.
+#
+# SAFETY: this workflow writes only to `sandbox`. `BTB_TARGET_SCHEMA` is
+# pinned below and the Phase 6 test asserts that a demo run leaves
+# `reporting` byte-identical.
+
+name: Failure demo (sandbox)
+
+on:
+  workflow_dispatch:
+    inputs:
+      defect:
+        description: Which defect to plant
+        type: choice
+        default: duplicate_goods_receipt
+        options:
+          - duplicate_goods_receipt
+          - backdated_gl_posting
+          - late_arriving_mes_events
+          - uom_mismatch
+          - orphaned_po_lines
+          - receipt_without_po
+          - invoice_price_outlier
+          - unapproved_standard_cost_change
+          - mes_erp_completion_gap
+          - missing_supplier_on_shipment
+          - truncated_extract
+          - stale_extract
+          - negative_on_hand
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-failure
+  cancel-in-progress: false
+
+jobs:
+  demo:
+    name: Plant ${{ inputs.defect }} and show the blocked publish
+    runs-on: ubuntu-latest
+    environment: hosted-demo
+    timeout-minutes: 10
+
+    env:
+      # Pinned: the failure demo never targets reporting.
+      BTB_TARGET_SCHEMA: sandbox
+      BTB_PROFILE: demo
+      BTB_DEFECT: ${{ inputs.defect }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Refuse to run against reporting
+        run: |
+          if [ "$BTB_TARGET_SCHEMA" != "sandbox" ]; then
+            echo "::error::The failure demo may only target the sandbox schema."
+            exit 1
+          fi
+          echo "Target schema: $BTB_TARGET_SCHEMA"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install the project
+        run: uv sync --extra dbt
+
+      - name: Not yet built
+        run: |
+          echo "::notice::The failure demo lands in Phase 6 (BTB-67)."
+          echo "Would plant: $BTB_DEFECT into schema $BTB_TARGET_SCHEMA"
+          exit 1

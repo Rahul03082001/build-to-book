@@ -1,0 +1,142 @@
+# Lint, tests, and (from Phase 1) dbt build plus reconciliations on every PR.
+#
+# These are the required status checks that stand in for a second approver
+# (ADR-011). A human cannot wave them through.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Change management: every change traces to a story (ADR-011).
+  # -------------------------------------------------------------------------
+  jira-key:
+    name: PR title carries a Jira key
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [[ ! "$PR_TITLE" =~ ^BTB-[0-9]+:\  ]]; then
+            echo "::error::PR title must start with a Jira key, e.g. 'BTB-12: add goods receipt staging model'"
+            echo "Got: $PR_TITLE"
+            exit 1
+          fi
+          echo "OK: $PR_TITLE"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install the project
+        run: uv sync --extra dev
+
+      - name: ruff check
+        run: uv run ruff check --output-format=github .
+
+      - name: ruff format
+        run: uv run ruff format --check .
+
+      - name: sqlfluff
+        run: |
+          if [ -n "$(find warehouse/dbt/models -name '*.sql' -print -quit 2>/dev/null)" ]; then
+            uv run sqlfluff lint warehouse/dbt/models
+          else
+            echo "No dbt models yet; skipping."
+          fi
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    # The warehouse is needed from Phase 1 onward. It starts now so the
+    # integration tests have somewhere to run as soon as they exist.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: btb
+          POSTGRES_USER: btb_admin
+          POSTGRES_PASSWORD: ci_only_not_a_secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U btb_admin -d btb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: btb
+      POSTGRES_USER: btb_admin
+      POSTGRES_PASSWORD: ci_only_not_a_secret
+      BTB_PROFILE: demo
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The audit trail records the commit SHA that produced each run,
+          # so CI needs real history rather than a shallow clone.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install the project
+        run: uv sync --extra dev --extra dbt
+
+      - name: Apply schemas
+        run: |
+          export PGPASSWORD="$POSTGRES_PASSWORD"
+          psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -f warehouse/sql/init/00_schemas.sql
+
+      - name: Run tests
+        run: uv run pytest -ra --cov=. --cov-report=term-missing
+
+  # -------------------------------------------------------------------------
+  # Phase 1 adds: dbt build with tests, and the reconciliations against a
+  # freshly generated dataset (BTB-51). The job is declared now so the
+  # required-check list in branch protection does not change later.
+  # -------------------------------------------------------------------------
+  pipeline:
+    name: Pipeline (dbt build + reconciliations)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Not yet built
+        run: |
+          echo "::notice::dbt build and reconciliations land in Phase 1 (BTB-19..BTB-23, BTB-51)."

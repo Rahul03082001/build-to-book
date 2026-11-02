@@ -1,0 +1,51 @@
+# Runs on staged files before every commit. Install once with:
+#   .venv/bin/pre-commit install
+#
+# CI re-runs the same checks on every pull request, so a bypassed hook
+# (`git commit --no-verify`) cannot get a change merged.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # dbt YAML uses Jinja in places that the generic parser rejects.
+        exclude: ^warehouse/dbt/
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        # Generated data belongs in data/, which is gitignored. A large file
+        # in a commit usually means an extract slipped past .gitignore.
+        args: ["--maxkb=1024"]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/sqlfluff/sqlfluff
+    rev: 3.1.0
+    hooks:
+      - id: sqlfluff-lint
+        # Only dbt models; warehouse/sql holds psql scripts with \set and
+        # :'variables' that the templater cannot parse.
+        files: ^warehouse/dbt/models/.*\.sql$
+
+  - repo: local
+    hooks:
+      # Keeps commit messages traceable to a story (ADR-011 compensating
+      # control). CI enforces the same rule on PR titles.
+      - id: jira-key-in-commit-message
+        name: commit message starts with a Jira key
+        entry: scripts/check_commit_message.py
+        language: python
+        stages: [commit-msg]
+        pass_filenames: true

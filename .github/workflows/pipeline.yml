@@ -1,0 +1,90 @@
+# Nightly pipeline run against the hosted demo database (BTB-25).
+#
+# A failed run blocks the publish and leaves `reporting` holding the last good
+# dataset (ADR-014), so the live dashboard degrades in freshness rather than
+# correctness. The run also keeps the free-tier database active, which reduces
+# cold starts before a demo (ADR-015).
+
+name: Nightly pipeline
+
+on:
+  schedule:
+    # 07:10 UTC. Offset from the hour because scheduled runs queue on the hour.
+    - cron: "10 7 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Data profile
+        type: choice
+        options: [demo]
+        default: demo
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never let two runs publish at once.
+  group: nightly-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: Generate, load, build, check, publish
+    runs-on: ubuntu-latest
+    environment: hosted-demo
+    timeout-minutes: 30
+
+    env:
+      BTB_PROFILE: ${{ inputs.profile || 'demo' }}
+      BTB_TARGET_SCHEMA: reporting
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install the project
+        run: uv sync --extra dbt
+
+      - name: Not yet built
+        run: |
+          echo "::notice::The nightly pipeline lands in Phase 1 (BTB-25)."
+          echo "Scheduled sequence: make data -> load -> build -> controls -> publish"
+          exit 1
+
+      # Phase 1 replaces the step above with the sequence below. The hosted
+      # DSN is a repository secret and is never echoed.
+      #
+      # - name: Generate the demo profile
+      #   run: make data PROFILE=demo
+      # - name: Load into raw
+      #   env:
+      #     BTB_HOSTED_DSN: ${{ secrets.BTB_HOSTED_DSN }}
+      #   run: make load
+      # - name: Build the candidate
+      #   env:
+      #     BTB_HOSTED_DSN: ${{ secrets.BTB_HOSTED_DSN }}
+      #   run: make build
+      # - name: Run the controls
+      #   env:
+      #     BTB_HOSTED_DSN: ${{ secrets.BTB_HOSTED_DSN }}
+      #   run: make controls
+      # - name: Publish if every critical check passed
+      #   env:
+      #     BTB_HOSTED_DSN: ${{ secrets.BTB_HOSTED_DSN }}
+      #   run: make publish
+      # - name: Upload the evidence pack
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: evidence-${{ github.run_id }}
+      #     path: evidence/
+      #     retention-days: 30
