@@ -161,43 +161,40 @@ def test_each_service_role_is_a_member_of_exactly_its_group(role: str) -> None:
     assert got == role.removesuffix("_svc"), f"{role} has unexpected memberships: {got!r}"
 
 
+def _psql_as(user: str, password: str, sql: str) -> subprocess.CompletedProcess[str]:
+    """Run SQL as a specific role, through the same wrapper the Makefile uses."""
+    env = {**os.environ, "POSTGRES_USER": user, "POSTGRES_PASSWORD": password}
+    return subprocess.run(
+        ["scripts/psql.sh", "-At", "-c", sql],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
 def test_reporter_is_denied_raw_on_a_real_connection() -> None:
     """has_table_privilege is the model; this is the behaviour.
 
-    Connecting as the role and being refused is the evidence a reviewer wants;
-    a catalogue lookup could still be wrong about what happens in practice.
+    Connecting as the role and being refused is the evidence a reviewer wants.
+    The permitted read is asserted in the same test on purpose: a denial on its
+    own would also "pass" if the connection were simply broken, which would
+    prove nothing about privileges.
     """
     password = os.environ.get("BTB_REPORTER_PASSWORD")
     if not password:
         pytest.skip("BTB_REPORTER_PASSWORD not set")
 
-    result = subprocess.run(
-        [
-            "docker",
-            "compose",
-            "exec",
-            "-T",
-            "-e",
-            f"PGPASSWORD={password}",
-            "warehouse",
-            "psql",
-            "-U",
-            "btb_reporter_svc",
-            "-d",
-            os.environ.get("POSTGRES_DB", "btb"),
-            "-c",
-            "select * from raw._role_probe;",
-        ],
-        capture_output=True,
-        text=True,
+    allowed = _psql_as("btb_reporter_svc", password, "select count(*) from reporting._role_probe;")
+    if allowed.returncode != 0 and "permission denied" not in allowed.stderr:
+        pytest.skip(f"reporter cannot reach the warehouse: {allowed.stderr.strip()[:200]}")
+    assert allowed.returncode == 0, (
+        f"reporter should be able to read reporting: {allowed.stderr.strip()[:300]}"
     )
-    if "could not translate host name" in result.stderr or result.returncode == 127:
-        pytest.skip("docker compose unavailable")
 
-    assert result.returncode != 0, "reporter was able to read raw"
+    denied = _psql_as("btb_reporter_svc", password, "select * from raw._role_probe;")
+    assert denied.returncode != 0, "reporter was able to read raw"
     # Denial is the property under test, not which layer refuses. Schema USAGE
-    # and the table grant are both withheld, so either message is a pass; the
-    # test should not break if one layer changes.
-    assert "permission denied" in result.stderr, (
-        f"reporter was refused, but not for permissions: {result.stderr.strip()[:300]}"
+    # and the table grant are both withheld, so either message is a pass.
+    assert "permission denied" in denied.stderr, (
+        f"reporter was refused, but not for permissions: {denied.stderr.strip()[:300]}"
     )

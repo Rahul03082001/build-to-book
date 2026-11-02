@@ -99,6 +99,12 @@ jobs:
       POSTGRES_USER: btb_admin
       POSTGRES_PASSWORD: ci_only_not_a_secret
       BTB_PROFILE: demo
+      # Ephemeral CI database, destroyed with the job. Real credentials live
+      # in the `hosted-demo` environment secrets.
+      BTB_LOADER_PASSWORD: ci_only_not_a_secret
+      BTB_TRANSFORMER_PASSWORD: ci_only_not_a_secret
+      BTB_REPORTER_PASSWORD: ci_only_not_a_secret
+      BTB_AUDITOR_PASSWORD: ci_only_not_a_secret
 
     steps:
       - uses: actions/checkout@v4
@@ -124,5 +130,10 @@ jobs:
           psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 -f warehouse/sql/init/00_schemas.sql
 
+      - name: Apply roles and grants
+        run: make roles
+
       - name: Run tests
+        # Includes the integration tests, so every PR re-proves that each role
+        # is denied what it should not reach (CTRL-013).
         run: uv run pytest -ra --cov=. --cov-report=term-missing
