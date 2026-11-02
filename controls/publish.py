@@ -322,13 +322,20 @@ def publish(
 
     # --- the swap -------------------------------------------------------
     try:
-        with conn.cursor() as cursor:
-            # Copies happen outside the swap transaction: they are the slow
-            # part, and holding a transaction open across them would keep
-            # readers waiting for no benefit.
+        # Copies get their own transaction, separate from the swap. They are
+        # the slow part, and the new tables are not referenced by any view
+        # yet, so committing them early keeps the swap transaction short --
+        # which is what stops a publish from stalling readers of the live
+        # dataset.
+        #
+        # This uses `conn.transaction()` rather than an explicit
+        # `conn.commit()`: psycopg forbids an explicit commit while a
+        # transaction context is open anywhere up the stack, and the caller
+        # may legitimately have one. CI caught that; a local smoke test on a
+        # fresh connection did not.
+        with conn.transaction(), conn.cursor() as cursor:
             for mart in marts:
                 _copy_mart(cursor, target_schema, mart, candidate_version)
-            conn.commit()
 
         with conn.transaction(), conn.cursor() as cursor:
             # One transaction for every view, so the whole certified dataset

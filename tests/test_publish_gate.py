@@ -40,6 +40,27 @@ def conn() -> Iterator[psycopg.Connection]:
         yield connection
 
 
+@pytest.fixture(scope="module", autouse=True)
+def require_built_marts(conn: psycopg.Connection) -> None:
+    """Skip, rather than fail obscurely, when the marts have not been built.
+
+    CI ran pytest before `make build` and these tests failed with
+    `UndefinedTable` five times over. A skip says what to do instead.
+    """
+    missing = []
+    with conn.cursor() as cursor:
+        for mart in (*publish_module.PUBLISHED_MARTS, "fct_gl_postings"):
+            cursor.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = %s",
+                (publish_module.BUILD_SCHEMA, mart),
+            )
+            if cursor.fetchone() is None:
+                missing.append(f"{publish_module.BUILD_SCHEMA}.{mart}")
+    if missing:
+        pytest.skip(f"run `make build` first; missing {', '.join(missing)}")
+
+
 @pytest.fixture(scope="module")
 def batch_id(conn: psycopg.Connection) -> str:
     with conn.cursor() as cursor:
