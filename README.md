@@ -143,7 +143,7 @@ PostgreSQL 16.15):
 
 | Result | Command |
 | --- | --- |
-| 198 unit tests pass | `make test` |
+| 205 unit tests pass | `make test` |
 | 37 role-permission integration tests pass | `make init && .venv/bin/pytest -m integration` |
 | Lint clean: ruff check, ruff format, sqlfluff | `make lint` |
 | Warehouse starts healthy, 9 schemas created | `make up` |
