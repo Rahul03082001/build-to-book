@@ -124,14 +124,19 @@ jobs:
       - name: Install the project
         run: uv sync --extra dev --extra dbt
 
-      - name: Apply schemas
+      - name: Create the schemas
+        # The service container skips docker-entrypoint-initdb.d, so the
+        # bootstrap file that `docker compose up` would run must be applied here.
         run: |
           export PGPASSWORD="$POSTGRES_PASSWORD"
           psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 -f warehouse/sql/init/00_schemas.sql
 
-      - name: Apply roles and grants
-        run: make roles
+      - name: Apply roles and tables
+        # The same target `make init` uses, so CI cannot drift from local when
+        # a new schema file is added -- which is exactly what happened when
+        # raw.sql and audit.sql landed and this step still only ran `make roles`.
+        run: make schemas
 
       - name: Run tests
         # Includes the integration tests, so every PR re-proves that each role

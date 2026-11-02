@@ -87,8 +87,12 @@ roles: ## Create warehouse roles and grants (warehouse/sql/roles.sql)
 psql: ## Open a psql shell on the warehouse
 	@scripts/psql.sh
 
+.PHONY: schemas
+schemas: roles raw-schema audit-schema ## Apply roles and all schemas to a running warehouse
+	@printf 'Schemas and roles up to date\n'
+
 .PHONY: init
-init: up roles raw-schema audit-schema ## Start the warehouse, apply roles and schemas
+init: up schemas ## Start the warehouse, then apply roles and schemas
 
 # ---------------------------------------------------------------------------
 # Pipeline
