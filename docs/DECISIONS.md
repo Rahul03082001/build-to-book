@@ -37,6 +37,9 @@ SOX-style controls. Nothing here claims SOX compliance (ADR-019).
 | [ADR-017](#adr-017-incremental-idempotent-loading-keyed-on-source-and-batch-ids) | 2026-11-02 | Incremental, idempotent loading keyed on source and batch IDs | Accepted |
 | [ADR-018](#adr-018-streamlit-as-the-data-trust-console-not-the-bi-dashboard) | 2026-11-02 | Streamlit as the data trust console, not the BI dashboard | Accepted |
 | [ADR-019](#adr-019-label-all-data-synthetic-and-all-controls-simulated) | 2026-11-02 | Label all data synthetic and all controls simulated | Accepted |
+| [ADR-020](#adr-020-idempotent-loading-by-staging-table-and-anti-join) | 2026-11-02 | Idempotent loading by staging table and anti-join | Accepted |
+| [ADR-021](#adr-021-publish-by-pointing-views-at-versioned-tables) | 2026-11-02 | Publish by pointing views at versioned tables | Accepted |
+| [ADR-022](#adr-022-control-totals-as-a-json-sidecar-per-extract) | 2026-11-02 | Control totals as a JSON sidecar per extract | Accepted |
 
 ---
 
@@ -874,6 +877,14 @@ closes with a live URL.
 - Jira: BTB-23 | PR/commit: initial commit
 - Area: Controls
 
+> **Amendment 2026-11-02.** The decision below stands: build into a candidate,
+> swap only if every critical check passes. The *mechanism* described under
+> Consequences — renaming schemas inside a transaction — is superseded by
+> [ADR-021](#adr-021-publish-by-pointing-views-at-versioned-tables), which
+> found that `ALTER DEFAULT PRIVILEGES` is keyed to the schema name and would
+> silently strip the reporter grants from each new build. The original
+> reasoning is left intact rather than rewritten.
+
 ### Context
 
 A pipeline run can fail halfway. What a leader sees while that is happening, and
@@ -1275,3 +1286,244 @@ than remembered each time.
 The README states it in the opening section; `generator/config.yaml` carries the
 notice at the top of the file; export manifests and dashboard footers carry it
 too.
+
+---
+
+## ADR-020: Idempotent loading by staging table and anti-join
+
+- Date: 2026-11-02
+- Status: Accepted
+- Jira: BTB-15 | PR/commit: BTB-9-phase-1-decisions
+- Area: Data
+
+### Context
+
+[ADR-017](#adr-017-incremental-idempotent-loading-keyed-on-source-and-batch-ids)
+settled that loading is incremental and idempotent on each extract's natural
+source ID. It did not settle *how*, and the choice turns out to decide whether
+one of the planted defects is detectable at all.
+
+Two situations look identical to a naive loader. A pipeline rerun after a
+failure re-presents rows that are already in `raw` — harmless, and the loader
+should skip them. An upstream interface retry posts the same goods receipt
+twice *within one extract* — a real control finding, and the loader must
+surface it. Both appear as "a row whose key already exists".
+
+### Options considered
+
+1. **Load into a per-batch staging table, then `INSERT ... SELECT` with a
+   `LEFT JOIN` anti-join**: the anti-join's skipped count is a real number the
+   loader can report and record. Con: an extra table write per file, and the
+   staging tables need cleaning up.
+2. **`INSERT ... ON CONFLICT DO NOTHING` against a unique index on the natural
+   key**: one statement, fastest, least code. Con: Postgres silently discards
+   the collision. `ON CONFLICT` reports only how many rows were inserted, not
+   which were dropped or why — so a rerun and a source-side duplicate are
+   indistinguishable, and the duplicate-receipt control has nothing to work
+   with.
+3. **A watermark on load timestamp or batch sequence**: no key comparisons at
+   all, and it scales past both. Con: it assumes rows never arrive out of
+   order, which Phase 2 deliberately violates with `late_arriving_mes_events`.
+   Anything dated before the watermark would never load, silently.
+
+### Decision
+
+Each file lands in a per-batch staging table in `raw`. Rows are then inserted
+into the target with a `LEFT JOIN` anti-join on the declared natural key, and
+the loader records three counts separately: rows in the file, rows inserted,
+and rows skipped as already present. A *within-file* duplicate on the natural
+key is detected before the anti-join and rejected, not skipped.
+
+### Reasons
+
+The anti-join turns "how many rows did this load skip, and why" into a
+reportable number instead of a side effect. That distinction is the whole
+reason this option wins: `audit.pipeline_runs` needs honest counts per file,
+and CTRL-001 needs to compare them against the control totals. `ON CONFLICT`
+would make both approximate.
+
+Separating "duplicated inside the source file" from "already present in raw"
+is what makes the duplicate-receipt defect a finding rather than a quiet
+no-op. An interface that posts a receipt twice is broken upstream and someone
+should hear about it; a rerun of yesterday's file is routine. Collapsing them
+would mean the control can never fire.
+
+Rejecting the watermark now rather than later also avoids building something
+Phase 2 is designed to break.
+
+### Consequences
+
+Easier: trustworthy per-file counts, a detectable difference between a retry
+and an upstream fault, and reruns that are safe by construction.
+
+Harder: one extra write per file, and the per-batch staging tables must be
+dropped on both the success and the failure path or `raw` accumulates
+litter — the loader drops them in a `finally`. Each extract must also declare
+a natural key, so a source that reuses IDs across periods would break the
+assumption; keys are documented and tested per extract.
+
+### How a reviewer can verify it
+
+The Phase 1 idempotency test runs the loader twice and asserts the second run
+inserts zero rows while reporting a non-zero skip count — not merely that the
+row total is unchanged. BTB-26 asserts a within-file duplicate is rejected and
+reported, with the count matching `defects_manifest.json`.
+
+---
+
+## ADR-021: Publish by pointing views at versioned tables
+
+- Date: 2026-11-02
+- Status: Accepted
+- Jira: BTB-23 | PR/commit: BTB-9-phase-1-decisions
+- Area: Controls
+
+### Context
+
+[ADR-014](#adr-014-publish-by-swapping-a-validated-build-into-reporting)
+decided that a validated build is swapped into `reporting` only when every
+critical check passes, and described the swap as renaming schemas inside a
+transaction. Implementing it exposed a problem with that mechanism serious
+enough to change it.
+
+`ALTER DEFAULT PRIVILEGES` is keyed to the schema **name**, not to the schema
+object. Rename `publish_candidate` to `reporting` and the default privileges
+attached to the name `reporting` no longer apply to it — so every table the
+next build creates silently loses the `reporter` role's `SELECT`. The live
+dashboard would break one run after the change, with nothing in the logs
+pointing at the rename.
+
+### Options considered
+
+1. **Build versioned tables inside `reporting`, and publish by recreating a
+   stable view over the newest version**: the schema is never renamed, so
+   grants and default privileges never move. The swap is a `CREATE OR REPLACE
+   VIEW` in one transaction — atomic and sub-second. The previous version
+   stays queryable, so rollback is pointing the view back. Con: old versions
+   accumulate and must be pruned, which matters against Neon's 1 GB cap.
+2. **Rename schemas in a transaction** (the original mechanism): one statement
+   moves the whole dataset, and it reads simply. Con: the default-privileges
+   footgun above, plus `reporting_old` has to be dropped or rotated, and dbt's
+   notion of where it built things no longer matches reality.
+3. **Rename each mart table individually inside `reporting`**: no schema
+   churn, grants stay put. Con: renaming N tables in one transaction holds
+   `ACCESS EXCLUSIVE` on all of them simultaneously. A dashboard query holding
+   a read lock blocks the publish, and once the publish is waiting it blocks
+   every subsequent reader — the exact stall the gate's lock timeout exists to
+   avoid, made more likely.
+
+### Decision
+
+Marts build as versioned tables in `reporting` (`inv_balance_v<batch_id>`).
+Publishing recreates a stable view per mart over the new version, inside one
+transaction. `reporting` keeps the previous version until it is pruned, and a
+rollback repoints the view.
+
+### Reasons
+
+Keeping the schema name fixed is what makes the access-control model hold
+across runs. The `reporter` role's grants are the live demo's only
+authorisation boundary, and a mechanism that strips them on a future build is
+not acceptable in the component whose entire job is to publish safely.
+
+The swap being a view definition change also makes it genuinely atomic and
+fast: readers see the old version or the new one, and the transaction touches
+catalogue rows rather than taking exclusive locks on large tables. That keeps
+blocking a failed publish cheap, which is what stops the critical checks from
+being disabled under pressure (ADR-010).
+
+Retaining the previous version is a bonus the other options do not offer: the
+"last good dataset" is not merely conceptual, it is still a table that can be
+queried and diffed against the rejected candidate.
+
+### Consequences
+
+Easier: grants that survive every publish, a sub-second atomic swap, rollback
+by repointing a view, and a last-good dataset that is directly inspectable.
+
+Harder: version pruning becomes a real responsibility — the gate keeps the
+current and previous versions and drops older ones, because two copies of
+every mart against a 1 GB free tier is already most of the budget
+(ADR-015, ADR-016). Consumers must also query the view, never a versioned
+table directly; the `reporter` role is granted on the views, which enforces it
+rather than relying on discipline.
+
+### How a reviewer can verify it
+
+BTB-23's forced-failure test asserts `reporting`'s views still resolve to the
+previous version, `audit.publish_log` records the reason, and the dashboard
+shows its earlier refresh time. A second test runs two successful publishes
+and asserts the `reporter` role can still read every view afterwards — the
+regression this ADR exists to prevent.
+
+---
+
+## ADR-022: Control totals as a JSON sidecar per extract
+
+- Date: 2026-11-02
+- Status: Accepted
+- Jira: BTB-13 | PR/commit: BTB-9-phase-1-decisions
+- Area: Controls
+
+### Context
+
+Each extract needs a control total — row count and value total — produced by
+the source so completeness can be checked at load (CTRL-001). Real ERP and
+mainframe extracts usually carry this as a trailer record in the file itself.
+The format decides how awkward validation is, and whether one file can be
+checked on its own.
+
+### Options considered
+
+1. **A JSON sidecar per extract** (`goods_movements.control_totals.json`): the
+   data file stays clean CSV that pandas and pandera read in one call, and the
+   totals are typed and extensible. Con: two files per extract, and a missing
+   sidecar must be treated as a hard failure rather than a skip, or the
+   control can be bypassed by deleting a file.
+2. **A trailer row inside the data file**: what real source systems do, and
+   the totals cannot be separated from the data. Con: every reader must strip
+   the last row before parsing. Schema validation sees a malformed row,
+   numeric columns have to tolerate a text marker, and the row count is
+   off by one everywhere until it is handled.
+3. **One manifest covering the whole run**: a single file, easy to diff across
+   runs. Con: it couples the extracts. `audit.pipeline_runs` records one row
+   *per file per run*, so validating a single extract in isolation is the unit
+   of work — a run-level manifest fights that grain.
+
+### Decision
+
+A JSON sidecar beside each extract, named by the
+`output.control_totals_suffix` setting in `generator/config.yaml`. A missing
+or unparseable sidecar fails the load for that file.
+
+### Reasons
+
+The per-file grain decides it. The audit trail, the completeness control, and
+the rejected-row log all work one file at a time, and a sidecar matches that
+exactly while a run-level manifest does not. Keeping the CSV free of a trailer
+row also means pandera validates the real schema rather than a schema plus one
+special case — and the UoM and type checks are load-bearing controls, so
+weakening them to accommodate a marker row is a bad trade.
+
+The realism argument for a trailer row is genuine and worth saying out loud in
+an interview: this is the one place the project chooses convenience over
+fidelity to how source systems actually behave. The mitigation is that the
+sidecar carries the same information and is validated just as strictly, and a
+missing sidecar is a hard failure — so the *control* is as strong, even though
+the file layout is tidier than reality.
+
+### Consequences
+
+Easier: clean CSV parsing, typed and extensible totals, and per-file
+validation that matches the audit grain.
+
+Harder: two files to keep together, and the "missing sidecar is a failure"
+rule must be tested, or the control becomes optional in practice. A future
+source that genuinely ships trailer records would need a reader that strips
+them into the same sidecar shape — noted as follow-up rather than built now.
+
+### How a reviewer can verify it
+
+BTB-13's test asserts the sidecar matches the extract it accompanies. A
+further test deletes a sidecar and asserts the load fails rather than skipping
+the completeness check.

@@ -14,7 +14,10 @@ import subprocess
 
 import pytest
 
-EXPECTED_ADR_COUNT = 19
+# The 19 decisions settled up front are a floor, not a total -- later phases
+# add entries. Contiguous numbering and the index-match test are what guard
+# the file's structure, so a hardcoded total would only create test churn.
+MINIMUM_ADR_COUNT = 19
 
 REQUIRED_SECTIONS = [
     "### Context",
@@ -53,8 +56,12 @@ def bodies(decisions_text: str) -> dict[str, str]:
     return out
 
 
-def test_expected_number_of_entries(entries: list[tuple[str, str, str]]) -> None:
-    assert len(entries) == EXPECTED_ADR_COUNT
+def test_at_least_the_settled_decisions_are_recorded(
+    entries: list[tuple[str, str, str]],
+) -> None:
+    assert len(entries) >= MINIMUM_ADR_COUNT, (
+        f"only {len(entries)} ADRs; the 19 settled decisions must all be present"
+    )
 
 
 def test_numbering_is_contiguous_and_ordered(entries: list[tuple[str, str, str]]) -> None:
