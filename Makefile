@@ -16,6 +16,9 @@ SHELL := /bin/bash
 PROFILE       ?= demo
 SEED          ?= 20261101
 TARGET_SCHEMA ?= reporting
+# Models build here and are swapped into reporting only if every critical
+# check passes (ADR-014, ADR-021).
+CANDIDATE_SCHEMA ?= publish_candidate
 DBT_DIR       := warehouse/dbt
 VENV          := .venv
 PY            := $(VENV)/bin/python
@@ -115,9 +118,22 @@ raw-schema: ## Create the raw landing tables
 	@scripts/psql.sh -q -f - < warehouse/sql/raw.sql
 	@printf 'Raw schema applied\n'
 
+DBT_FLAGS = --project-dir $(DBT_DIR) --profiles-dir $(DBT_DIR)
+
+.PHONY: dbt-deps
+dbt-deps: ## Install dbt package dependencies
+	$(DBT) deps $(DBT_FLAGS)
+
 .PHONY: build
-build: ## Run dbt build into the publish candidate schema  [PHASE 1]
-	$(call NOT_YET,dbt build staging -> intermediate -> marts,Phase 1 (BTB-19..BTB-21))
+build: ## Run dbt build (models + tests) into the candidate schema
+	@# `dbt build`, not `dbt run`: it interleaves tests with models and fails
+	@# on a failing test, so a model that breaks a business rule cannot be
+	@# published (ADR-010).
+	BTB_TARGET_SCHEMA=$(CANDIDATE_SCHEMA) $(DBT) build $(DBT_FLAGS)
+
+.PHONY: dbt-test
+dbt-test: ## Run dbt tests only, without rebuilding
+	BTB_TARGET_SCHEMA=$(CANDIDATE_SCHEMA) $(DBT) test $(DBT_FLAGS)
 
 .PHONY: controls
 controls: ## Run reconciliations and record results  [PHASE 1]

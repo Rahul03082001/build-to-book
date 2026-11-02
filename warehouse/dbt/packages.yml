@@ -1,9 +1,15 @@
 packages:
-  # Surrogate keys, date spine for dim_date, and test helpers.
+  # Surrogate keys, a date spine for dim_date, and the generic tests this
+  # project leans on: expression_is_true for business rules,
+  # unique_combination_of_columns for composite grain, and equal_rowcount /
+  # fewer_rows_than for layer-to-layer completeness.
   - package: dbt-labs/dbt_utils
-    version: [">=1.1.0", "<2.0.0"]
+    version: [">=1.4.0", "<2.0.0"]
 
-  # Extra generic tests: expression_is_true, not_null_proportion, and the
-  # cardinality assertions the as-of join checks need (ADR-007).
-  - package: calogica/dbt_expectations
-    version: [">=0.10.0", "<0.11.0"]
+# dbt_expectations was listed in Phase 0 for cardinality and proportion
+# assertions. Dropped before writing any models: every test this project needs
+# is in dbt_utils, so it would have been a dependency carried "just in case".
+# It has also moved from calogica/ to metaplane/ (0.10.10 at the time of
+# writing), which the old coordinates warn about on every `dbt deps`. If a
+# later phase needs an expect_* test, add it then under the metaplane
+# namespace rather than keeping a stale redirect in the lock file.

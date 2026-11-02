@@ -1,0 +1,122 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Landed source extracts, exactly as they arrived. Every row carries its
+      batch, source file, that file's SHA-256 and the load time, so any
+      downstream number traces back to the file that produced it (ADR-008).
+      All data is synthetic (ADR-019).
+    schema: raw
+    loaded_at_field: _loaded_at
+
+    # Freshness windows come from generator/config.yaml. A source older than
+    # its window blocks publishing of the metrics it feeds (CTRL-008, Phase 4).
+    freshness:
+      warn_after: {count: 24, period: hour}
+      error_after: {count: 48, period: hour}
+
+    tables:
+      - name: materials
+        description: Material master. One row per material.
+        columns:
+          - name: material_number
+            description: Material number. Natural key.
+            data_tests: [unique, not_null]
+          - name: material_group
+            description: Component class (GPU, CPU, DIMM, NVME, PSU, NIC, CHASSIS, CABLE, RACK_ASSY).
+            data_tests: [not_null]
+          - name: base_uom
+            description: Base unit of measure. Standardised in staging.
+            data_tests: [not_null]
+
+      - name: suppliers
+        description: Vendor master. One row per supplier.
+        columns:
+          - name: supplier_number
+            data_tests: [unique, not_null]
+
+      - name: standard_costs
+        description: >
+          Effective-dated standard costs. Exactly one window is in force on any
+          date, so an as-of join returns one row (ADR-007).
+        columns:
+          - name: material_number
+            data_tests: [not_null]
+          - name: valid_from
+            data_tests: [not_null]
+          - name: valid_to
+            description: >
+              End of the window. 9999-12-31 means open-ended, which is SAP's
+              convention and avoids NULL handling in every as-of join.
+            data_tests: [not_null]
+          - name: standard_cost_usd
+            data_tests: [not_null]
+
+      - name: purchase_order_headers
+        description: Purchase order headers. One row per PO.
+        columns:
+          - name: po_number
+            data_tests: [unique, not_null]
+
+      - name: purchase_order_lines
+        description: >
+          Purchase order items. One row per PO line -- a different grain from
+          the header, so any count must say which it means.
+        columns:
+          - name: po_number
+            data_tests: [not_null]
+          - name: po_item
+            data_tests: [not_null]
+
+      - name: goods_movements
+        description: >
+          Material document lines. One row per document item. Movement type
+          decides the sign of the quantity.
+        columns:
+          - name: material_document
+            data_tests: [not_null]
+          - name: fiscal_year
+            description: >
+              Part of the natural key: document numbers repeat across fiscal
+              years (ADR-020).
+            data_tests: [not_null]
+          - name: movement_type
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["101", "261"]
+          - name: quantity
+            data_tests: [not_null]
+          - name: amount_usd
+            description: Valued at the standard cost in force on the posting date.
+            data_tests: [not_null]
+
+      - name: inventory_revaluations
+        description: >
+          Value-only entries posted when a standard cost changes (ADR-023).
+          Carries no quantity, because nothing physically moved.
+        columns:
+          - name: revaluation_document
+            data_tests: [not_null]
+          - name: amount_usd
+            data_tests: [not_null]
+
+      - name: gl_postings
+        description: Accounting document lines. One row per line item.
+        columns:
+          - name: accounting_document
+            data_tests: [not_null]
+          - name: debit_credit_indicator
+            description: SAP indicators -- S is a debit, H is a credit.
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["S", "H"]
+          - name: signed_amount_usd
+            description: >
+              Debits positive, credits negative, so a period's net movement on
+              an account is a plain sum.
+            data_tests: [not_null]

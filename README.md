@@ -104,7 +104,7 @@ Built in vertical slices, so there is always something runnable
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **0** | Repo skeleton, 19 ADRs, backlog, CI, warehouse roles | **Complete** |
-| 1 | Inventory slice end to end, deployed live | **In progress** — generator + validated loader done (BTB-10…BTB-18, BTB-76) |
+| 1 | Inventory slice end to end, deployed live | **In progress** — generator, loader and star schema done (BTB-10…BTB-21, BTB-76) |
 | 2 | All four source systems, 13 planted defects at volume | Not started |
 | 3 | Full star schema in dbt, plus a performance tuning study | Not started |
 | 4 | Reconciliations, evidence packs, access review, control matrix | Not started |
@@ -143,7 +143,7 @@ PostgreSQL 16.15):
 
 | Result | Command |
 | --- | --- |
-| 205 unit tests pass | `make test` |
+| 259 unit tests pass | `make test` |
 | 37 role-permission integration tests pass | `make init && .venv/bin/pytest -m integration` |
 | Lint clean: ruff check, ruff format, sqlfluff | `make lint` |
 | Warehouse starts healthy, 9 schemas created | `make up` |
@@ -155,9 +155,13 @@ PostgreSQL 16.15):
 | Audit trail refuses UPDATE, DELETE **and** TRUNCATE | `.venv/bin/pytest -k refuses_modification` |
 | Source-side duplicate rejected while a rerun is skipped | `.venv/bin/pytest -k in_file_duplicate` |
 | A one-cent trailer mismatch is caught with the row count intact | `.venv/bin/pytest -k value_total` |
+| 172 dbt nodes build and pass: 15 models, 157 tests | `make build` |
+| Closing inventory = quantity × cost in force, every material and period | `make build` (singular test) |
+| Subledger ties to GL account 130000 to the cent, in SQL | `make build` (singular test) |
+| An as-of join to the Type 2 dimension returns exactly one row per fact | `make build` (singular test) |
 | Subledger ties to GL to the cent, every period | `.venv/bin/pytest -k subledger_ties` |
 | Closing inventory = quantity × current standard cost, per material | `.venv/bin/pytest -k closing_value` |
-| CI green on `main`: lint + all 269 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
+| CI green on `main`: lint + all 323 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
 | Direct push to `main` rejected: `GH006 ... protected branch hook declined` | `git commit --allow-empty -m "BTB-0: test" && git push origin main` |
 
 The role tests were also confirmed to **fail** when a privilege is deliberately
