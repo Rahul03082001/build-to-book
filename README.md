@@ -141,7 +141,7 @@ PostgreSQL 16.15):
 | --- | --- |
 | 116 unit tests pass | `make test` |
 | 37 role-permission integration tests pass | `make init && .venv/bin/pytest -m integration` |
-| Lint clean across 28 files | `make lint` |
+| Lint clean: ruff check, ruff format, sqlfluff | `make lint` |
 | Warehouse starts healthy, 9 schemas created | `make up` |
 | `make roles` is idempotent — clean exit on a second run | `make roles && make roles` |
 | `reporter` is refused on `raw`, permitted on `reporting` | `.venv/bin/pytest -m integration -k reporter` |
