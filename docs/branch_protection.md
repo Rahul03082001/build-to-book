@@ -38,9 +38,11 @@ Repository → **Settings** → **Branches** → **Add branch protection rule**.
      - `Lint`
      - `Tests`
 
-   Add `Pipeline (dbt build + reconciliations)` to this list when Phase 1
-   (BTB-51) adds that job. It is deliberately absent for now: a required check
-   that runs nothing is a green tick claiming coverage that does not exist.
+   There is deliberately no separate `Pipeline` check. `dbt build` and the
+   reconciliations run **inside** the `Tests` job against a freshly generated
+   dataset, so the three checks above cover the whole pipeline. An earlier
+   version had a standalone `Pipeline` job that reported success while running
+   nothing -- a green tick claiming coverage that did not exist.
 4. Tick **Require conversation resolution before merging**
 5. Tick **Require linear history**
 6. Tick **Do not allow bypassing the above settings**

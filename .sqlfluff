@@ -11,6 +11,10 @@ tab_space_size = 4
 
 [sqlfluff:templater:jinja]
 apply_dbt_builtins = true
+# dbt package macros are not available to the jinja templater, and an
+# unresolvable macro makes sqlfluff skip the whole file. See the module
+# docstring for why the dbt templater was not used instead.
+library_path = warehouse/dbt/sqlfluff_libs
 
 [sqlfluff:rules:capitalisation.keywords]
 capitalisation_policy = lower
@@ -21,13 +25,27 @@ extended_capitalisation_policy = lower
 [sqlfluff:rules:capitalisation.functions]
 extended_capitalisation_policy = lower
 
+# Column aliases are aligned in the staging models: a wide rename list is
+# far easier to read down a column than wrapped at one space. sqlfluff
+# supports this explicitly rather than needing the rule disabled.
+[sqlfluff:layout:type:alias_expression]
+spacing_before = align
+align_within = select_clause
+align_scope = bracketed
+
 [sqlfluff:rules:aliasing.table]
 aliasing = explicit
 
 [sqlfluff:rules:aliasing.column]
 aliasing = explicit
 
-# Grain and provenance columns must be spelled out, so `select *` is banned
-# in models -- lineage cannot resolve a star to source columns (ADR-009).
+# GROUP BY names its columns rather than their positions. `group by 1, 2`
+# breaks silently when the select list is reordered, which is precisely the
+# kind of quiet failure this project exists to make impossible.
+#
+# (`select *` is banned too, but by tests/test_dbt_project.py rather than by
+# sqlfluff -- the reason is lineage resolution, not style: sqlglot cannot trace
+# a star to its source columns, so a certified KPI's lineage would be
+# unresolvable (ADR-009).)
 [sqlfluff:rules:ambiguous.column_references]
 group_by_and_order_by_style = explicit

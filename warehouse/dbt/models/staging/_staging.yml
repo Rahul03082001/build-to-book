@@ -1,0 +1,253 @@
+version: 2
+
+models:
+  - name: stg_materials
+    description: "GRAIN: one row per material. Renamed, typed, units standardised. No joins."
+    columns:
+      - name: material_number
+        description: Material number. Natural key.
+        data_tests: [unique, not_null]
+      - name: material_group
+        description: Component class. Drives the inventory-by-group reporting.
+        data_tests: [not_null]
+      - name: base_unit_of_measure
+        description: >
+          Base unit, upper-cased and trimmed here so every downstream quantity
+          is comparable. CTRL-011 depends on staging having exactly one rule.
+        data_tests: [not_null]
+      - name: batch_id
+        description: The load batch that landed this row (ADR-008).
+        data_tests: [not_null]
+
+  - name: stg_suppliers
+    description: "GRAIN: one row per supplier."
+    columns:
+      - name: supplier_number
+        data_tests: [unique, not_null]
+      - name: supplier_name
+        data_tests: [not_null]
+
+  - name: stg_standard_costs
+    description: >
+      GRAIN: one row per material per validity window. Exactly one window is
+      in force on any date, so an as-of join returns one row (ADR-007).
+    columns:
+      - name: material_number
+        data_tests: [not_null]
+      - name: valid_from
+        data_tests: [not_null]
+      - name: valid_to
+        description: 9999-12-31 for the open window -- SAP's convention, and it avoids NULL handling.
+        data_tests: [not_null]
+      - name: standard_cost_usd
+        description: Standard cost. Must be positive; inventory valued at zero is meaningless.
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: standard_cost_is_positive
+              arguments:
+                expression: "> 0"
+      - name: is_current
+        description: True for the open-ended window. Lets "current cost" be a filter.
+        data_tests: [not_null]
+      - name: approved_by
+        description: Who authorised the cost. CTRL-007 joins changes to approvals.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [material_number, valid_from]
+
+  - name: stg_purchase_order_headers
+    description: "GRAIN: one row per purchase order."
+    columns:
+      - name: po_number
+        data_tests: [unique, not_null]
+      - name: supplier_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_suppliers')
+                field: supplier_number
+
+  - name: stg_purchase_order_lines
+    description: >
+      GRAIN: one row per purchase order LINE. A different grain from the
+      header, so a count of purchase orders is ambiguous until a model says
+      which it means.
+    columns:
+      - name: po_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_purchase_order_headers')
+                field: po_number
+      - name: po_item
+        data_tests: [not_null]
+      - name: material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_materials')
+                field: material_number
+      - name: quantity_ordered
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: quantity_ordered_is_positive
+              arguments:
+                expression: "> 0"
+      - name: net_value_usd
+        description: Quantity x unit price, rounded to the cent.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [po_number, po_item]
+      - dbt_utils.expression_is_true:
+          name: po_line_net_value_is_quantity_times_price
+          arguments:
+            expression: "net_value_usd = round(quantity_ordered * unit_price_usd, 2)"
+
+  - name: stg_goods_movements
+    description: >
+      GRAIN: one row per material document line. Movement type is translated
+      into an explicit direction once, here, so a new movement type cannot
+      silently get a sign of zero and drop out of the inventory balance.
+    columns:
+      - name: material_document
+        data_tests: [not_null]
+      - name: fiscal_year
+        description: Part of the natural key -- document numbers repeat across years (ADR-020).
+        data_tests: [not_null]
+      - name: movement_direction
+        description: RECEIPT or ISSUE, derived from the movement type.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["RECEIPT", "ISSUE"]
+      - name: material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_materials')
+                field: material_number
+      - name: quantity
+        description: Signed by movement type. Never zero -- a movement of nothing is a parsing fault.
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: movement_quantity_is_never_zero
+              arguments:
+                expression: "<> 0"
+      - name: amount_usd
+        description: Valued at the standard cost in force on the POSTING date.
+        data_tests: [not_null]
+      - name: posting_date
+        description: The reporting basis (docs/metric_definitions.md).
+        data_tests: [not_null]
+      - name: posting_period
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [material_document, fiscal_year, material_document_item]
+      # A receipt adds, an issue subtracts. Getting this backwards inverts the
+      # balance sheet, so it is asserted rather than assumed.
+      - dbt_utils.expression_is_true:
+          name: receipts_increase_inventory
+          arguments:
+            expression: "quantity > 0"
+            config:
+              where: "movement_direction = 'RECEIPT'"
+      - dbt_utils.expression_is_true:
+          name: issues_decrease_inventory
+          arguments:
+            expression: "quantity < 0"
+            config:
+              where: "movement_direction = 'ISSUE'"
+      # Paperwork is raised on or before the posting hits the books.
+      - dbt_utils.expression_is_true:
+          name: document_date_not_after_posting_date
+          arguments:
+            expression: "document_date <= posting_date"
+
+  - name: stg_inventory_revaluations
+    description: >
+      GRAIN: one row per revaluation document. Value-only entries posted when
+      a standard cost changes (ADR-023). No quantity, because nothing moved.
+    columns:
+      - name: revaluation_document
+        data_tests: [not_null]
+      - name: material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_materials')
+                field: material_number
+      - name: quantity_on_hand
+        description: Stock revalued. Positive -- revaluing nothing would post a zero entry.
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: revalued_quantity_is_positive
+              arguments:
+                expression: "> 0"
+      - name: amount_usd
+        description: Cost delta x quantity on hand.
+        data_tests: [not_null]
+      - name: approved_by
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [revaluation_document, fiscal_year]
+      - dbt_utils.expression_is_true:
+          name: revaluation_amount_is_delta_times_quantity
+          arguments:
+            expression: "amount_usd = round(cost_delta_usd * quantity_on_hand, 2)"
+
+  - name: stg_gl_postings
+    description: "GRAIN: one row per accounting document line."
+    columns:
+      - name: accounting_document
+        data_tests: [not_null]
+      - name: posting_direction
+        description: DEBIT or CREDIT, from the SAP S/H indicator.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["DEBIT", "CREDIT"]
+      - name: gl_account
+        data_tests: [not_null]
+      - name: signed_amount_usd
+        description: Debits positive, credits negative, so a net movement is a plain sum.
+        data_tests: [not_null]
+      - name: reference_document
+        description: The material document or revaluation document that caused the posting.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [accounting_document, fiscal_year, line_item]
+      # The sign convention must follow the indicator, or a period's net
+      # movement is wrong in a way that still looks plausible.
+      - dbt_utils.expression_is_true:
+          name: debits_are_positive
+          arguments:
+            expression: "signed_amount_usd = amount_usd"
+            config:
+              where: "posting_direction = 'DEBIT'"
+      - dbt_utils.expression_is_true:
+          name: credits_are_negative
+          arguments:
+            expression: "signed_amount_usd = -amount_usd"
+            config:
+              where: "posting_direction = 'CREDIT'"

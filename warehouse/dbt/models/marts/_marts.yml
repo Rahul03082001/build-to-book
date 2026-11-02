@@ -1,0 +1,249 @@
+version: 2
+
+models:
+  # -------------------------------------------------------------------------
+  # Dimensions
+  # -------------------------------------------------------------------------
+  - name: dim_material
+    description: >
+      GRAIN: one row per material per standard cost validity window (SCD Type 2,
+      ADR-007). A material with two cost windows has two rows, so this
+      dimension is UNSAFE to join on material_number alone -- a plain equality
+      join multiplies fact rows by the number of windows. Join as-of:
+      `on d.material_number = f.material_number and f.posting_date between
+      d.valid_from and d.valid_to`. Use dim_material_current for today's view.
+    columns:
+      - name: material_version_key
+        description: Surrogate key over (material_number, valid_from).
+        data_tests: [unique, not_null]
+      - name: material_number
+        description: Material number. NOT unique in this model -- see the grain.
+        data_tests: [not_null]
+      - name: valid_from
+        data_tests: [not_null]
+      - name: valid_to
+        data_tests: [not_null]
+      - name: standard_cost_usd
+        data_tests: [not_null]
+      - name: is_current
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [material_number, valid_from]
+      - dbt_utils.expression_is_true:
+          name: cost_window_starts_before_it_ends
+          arguments:
+            expression: "valid_from <= valid_to"
+
+  - name: dim_material_current
+    description: >
+      GRAIN: one row per material. The current view, for consumers that do not
+      need history and should not have to get an as-of join right.
+    columns:
+      - name: material_number
+        data_tests: [unique, not_null]
+      - name: material_group
+        data_tests: [not_null]
+      - name: current_standard_cost_usd
+        data_tests: [not_null]
+
+  - name: dim_supplier
+    description: >
+      GRAIN: one row per supplier. Type 1 -- attributes are overwritten, not
+      versioned, because nothing in this slice values anything at a supplier
+      attribute. If supplier terms ever drive a metric this needs ADR-007's
+      treatment.
+    columns:
+      - name: supplier_number
+        data_tests: [unique, not_null]
+      - name: supplier_name
+        data_tests: [not_null]
+
+  - name: dim_date
+    description: >
+      GRAIN: one row per calendar date. Built from the posting dates actually
+      present and padded to whole months, so it cannot silently fail to cover
+      a posting date -- a missing date row drops a fact from any inner join.
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+      - name: period
+        data_tests: [not_null]
+      - name: calendar_year
+        data_tests: [not_null]
+
+  # -------------------------------------------------------------------------
+  # Facts
+  # -------------------------------------------------------------------------
+  - name: fct_goods_movements
+    description: >
+      GRAIN: one row per material document LINE (material_document,
+      fiscal_year, material_document_item). NOT one row per document -- a
+      document can carry several items, so a count of documents and a count of
+      lines are different numbers.
+    columns:
+      - name: goods_movement_key
+        description: Surrogate key over the three-part natural key.
+        data_tests: [unique, not_null]
+      - name: material_document
+        data_tests: [not_null]
+      - name: fiscal_year
+        description: Part of the key -- document numbers repeat across years (ADR-020).
+        data_tests: [not_null]
+      - name: movement_direction
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["RECEIPT", "ISSUE"]
+      - name: material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_material_current')
+                field: material_number
+      - name: quantity
+        description: Signed by movement type, so a net movement is sum().
+        data_tests: [not_null]
+      - name: amount_usd
+        description: Valued at the standard cost in force on the posting date.
+        data_tests: [not_null]
+      - name: posting_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: batch_id
+        description: Provenance -- ties the row to its load run (ADR-008).
+        data_tests: [not_null]
+      - name: source_file_sha256
+        description: Checksum of the file this row came from.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              [material_document, fiscal_year, material_document_item]
+      # A receipt must reference a PO line; an issue must not.
+      - dbt_utils.expression_is_true:
+          name: receipts_reference_a_purchase_order
+          arguments:
+            expression: "po_number is not null"
+            config:
+              where: "movement_direction = 'RECEIPT'"
+      - dbt_utils.expression_is_true:
+          name: issues_reference_no_purchase_order
+          arguments:
+            expression: "po_number is null"
+            config:
+              where: "movement_direction = 'ISSUE'"
+
+  - name: fct_inventory_revaluations
+    description: >
+      GRAIN: one row per revaluation document. The second half of the
+      inventory subledger (ADR-023) -- value without quantity.
+    columns:
+      - name: revaluation_key
+        data_tests: [unique, not_null]
+      - name: material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_material_current')
+                field: material_number
+      - name: amount_usd
+        data_tests: [not_null]
+      - name: approved_by
+        description: CTRL-007 traces a revaluation to the approval of its cost change.
+        data_tests: [not_null]
+
+  - name: fct_gl_postings
+    description: "GRAIN: one row per accounting document line."
+    columns:
+      - name: gl_posting_key
+        data_tests: [unique, not_null]
+      - name: gl_account
+        data_tests: [not_null]
+      - name: signed_amount_usd
+        data_tests: [not_null]
+      - name: reference_document
+        description: The material or revaluation document that caused the posting.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [accounting_document, fiscal_year, line_item]
+
+  # -------------------------------------------------------------------------
+  # Certified KPI mart
+  # -------------------------------------------------------------------------
+  - name: mart_inventory_balance
+    description: >
+      GRAIN: one row per material per posting period.
+
+      CERTIFIED: inventory value. Definition in docs/metric_definitions.md.
+
+      Period activity plus the cumulative closing position, so it answers both
+      "what moved in August?" and "what was on hand at the end of August?" --
+      two questions that get confused and differ by the opening balance.
+
+      Value is goods movements PLUS standard cost revaluations (ADR-023), so
+      closing_quantity and closing_value_usd deliberately draw on different
+      sources.
+    config:
+      meta:
+        certified: true
+        owner: Finance
+    columns:
+      - name: inventory_balance_key
+        data_tests: [unique, not_null]
+      - name: material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_material_current')
+                field: material_number
+      - name: posting_period
+        data_tests: [not_null]
+      - name: material_group
+        description: Drives the inventory-value-by-group tile on the dashboard.
+        data_tests: [not_null]
+      - name: closing_quantity
+        description: On-hand quantity at the end of the period, cumulative.
+        data_tests: [not_null]
+      - name: closing_value_usd
+        description: >
+          On-hand value at the end of the period. Equals closing_quantity x the
+          standard cost in force, which is asserted below.
+        data_tests: [not_null]
+      - name: is_negative_on_hand
+        description: >
+          Exception flag for the Inventory dashboard page. Physically
+          impossible, so clean data never sets it (CTRL-010).
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [material_number, posting_period]
+      # CTRL-010: negative on-hand is physically impossible.
+      - dbt_utils.expression_is_true:
+          name: no_negative_on_hand
+          arguments:
+            expression: "closing_quantity >= 0"
+      # The balance must articulate: opening + movement = closing, in both
+      # quantity and value. A window-function error breaks this while leaving
+      # every individual figure plausible.
+      - dbt_utils.expression_is_true:
+          name: quantity_balance_articulates
+          arguments:
+            expression: "opening_quantity + movement_quantity = closing_quantity"
+      - dbt_utils.expression_is_true:
+          name: value_balance_articulates
+          arguments:
+            expression: "opening_value_usd + period_value_change_usd = closing_value_usd"
