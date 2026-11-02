@@ -126,17 +126,3 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -ra --cov=. --cov-report=term-missing
-
-  # -------------------------------------------------------------------------
-  # Phase 1 adds: dbt build with tests, and the reconciliations against a
-  # freshly generated dataset (BTB-51). The job is declared now so the
-  # required-check list in branch protection does not change later.
-  # -------------------------------------------------------------------------
-  pipeline:
-    name: Pipeline (dbt build + reconciliations)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Not yet built
-        run: |
-          echo "::notice::dbt build and reconciliations land in Phase 1 (BTB-19..BTB-23, BTB-51)."

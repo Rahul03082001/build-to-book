@@ -7,8 +7,9 @@
 name: dbt docs
 
 on:
-  push:
-    branches: [main]
+  # Phase 5 (BTB-57) restores the push trigger. Until the job actually
+  # generates docs it would fail on every merge, and a permanently red check
+  # teaches people to ignore CI.
   workflow_dispatch:
 
 permissions:

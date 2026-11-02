@@ -37,7 +37,10 @@ Repository → **Settings** → **Branches** → **Add branch protection rule**.
      - `PR title carries a Jira key`
      - `Lint`
      - `Tests`
-     - `Pipeline (dbt build + reconciliations)`
+
+   Add `Pipeline (dbt build + reconciliations)` to this list when Phase 1
+   (BTB-51) adds that job. It is deliberately absent for now: a required check
+   that runs nothing is a green tick claiming coverage that does not exist.
 4. Tick **Require conversation resolution before merging**
 5. Tick **Require linear history**
 6. Tick **Do not allow bypassing the above settings**

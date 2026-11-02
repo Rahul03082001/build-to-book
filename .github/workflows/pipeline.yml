@@ -8,9 +8,10 @@
 name: Nightly pipeline
 
 on:
-  schedule:
-    # 07:10 UTC. Offset from the hour because scheduled runs queue on the hour.
-    - cron: "10 7 * * *"
+  # Phase 1 (BTB-25) restores the nightly schedule:
+  #   schedule:
+  #     - cron: "10 7 * * *"   # offset: scheduled runs queue on the hour
+  # Enabling it now would fail every night and bury a real failure in noise.
   workflow_dispatch:
     inputs:
       profile:
