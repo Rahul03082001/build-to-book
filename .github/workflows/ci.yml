@@ -159,6 +159,12 @@ jobs:
       - name: dbt build (models + tests)
         run: make build
 
+      - name: Run the reconciliations
+        run: make controls
+
+      - name: Publish through the gate
+        run: make publish
+
       - name: Upload dbt artifacts
         if: always()
         uses: actions/upload-artifact@v4

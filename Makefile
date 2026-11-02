@@ -19,6 +19,8 @@ TARGET_SCHEMA ?= reporting
 # Models build here and are swapped into reporting only if every critical
 # check passes (ADR-014, ADR-021).
 CANDIDATE_SCHEMA ?= publish_candidate
+# Schema dbt builds the marts into; the gate copies from here into reporting.
+BUILD_SCHEMA ?= marts
 DBT_DIR       := warehouse/dbt
 VENV          := .venv
 PY            := $(VENV)/bin/python
@@ -91,7 +93,7 @@ psql: ## Open a psql shell on the warehouse
 	@scripts/psql.sh
 
 .PHONY: schemas
-schemas: roles raw-schema audit-schema ## Apply roles and all schemas to a running warehouse
+schemas: roles raw-schema audit-schema controls-schema ## Apply roles and all schemas to a running warehouse
 	@printf 'Schemas and roles up to date\n'
 
 .PHONY: init
@@ -112,6 +114,11 @@ load: ## Validate and incrementally load extracts into raw
 audit-schema: ## Create the append-only audit tables
 	@scripts/psql.sh -q -f - < warehouse/sql/audit.sql
 	@printf 'Audit schema applied (append-only enforced)\n'
+
+.PHONY: controls-schema
+controls-schema: ## Create the control result and publish log tables
+	@scripts/psql.sh -q -f - < warehouse/sql/controls.sql
+	@printf 'Controls schema applied (append-only enforced)\n'
 
 .PHONY: raw-schema
 raw-schema: ## Create the raw landing tables
@@ -136,12 +143,12 @@ dbt-test: ## Run dbt tests only, without rebuilding
 	BTB_TARGET_SCHEMA=$(CANDIDATE_SCHEMA) $(DBT) test $(DBT_FLAGS)
 
 .PHONY: controls
-controls: ## Run reconciliations and record results  [PHASE 1]
-	$(call NOT_YET,Run reconciliations into audit.reconciliation_results,Phase 1 (BTB-22))
+controls: ## Run reconciliations and record results
+	$(PY) -m controls --schema $(BUILD_SCHEMA)
 
 .PHONY: publish
-publish: ## Swap a validated build into reporting if all checks pass  [PHASE 1]
-	$(call NOT_YET,Publish gate: swap publish_candidate into reporting,Phase 1 (BTB-23))
+publish: ## Swap a validated build into reporting if every critical check passes
+	$(PY) -m controls --schema $(BUILD_SCHEMA) --publish --target-schema $(TARGET_SCHEMA)
 
 .PHONY: lineage
 lineage: ## Generate column-level KPI lineage with sqlglot  [PHASE 5]
