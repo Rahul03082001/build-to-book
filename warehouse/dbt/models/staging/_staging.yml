@@ -550,6 +550,32 @@ models:
           to decide what counts as which.
         data_tests: [not_null]
 
+  - name: stg_trial_balance
+    description: >
+      GRAIN: one row per general ledger account per posting period.
+    columns:
+      - name: gl_account
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_chart_of_accounts')
+                field: gl_account
+      - name: closing_balance_usd
+        data_tests: [not_null]
+      - name: period_movement_usd
+        description: >
+          Closing less opening: the period's own movement, which is what
+          reconciles against the postings. Isolating it from balances carried
+          forward means a disagreement points at the period that caused it
+          rather than at every period after it.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              [company_code, fiscal_year, posting_period, gl_account]
+
   - name: stg_shipment_headers
     description: >
       GRAIN: one row per inbound delivery.

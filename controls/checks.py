@@ -555,6 +555,92 @@ SHIPMENT_REFERENCES_RESOLVE = Check(
 )
 
 # ---------------------------------------------------------------------------
+# CTRL-019: the trial balance agrees with the general ledger.
+#
+# Two checks, because they fail for different reasons and a reviewer needs to
+# know which happened.
+#
+# The first is internal: a period's closing balances must net to zero. That is
+# the one assertion a trial balance exists to make, and a trial balance that
+# fails it is not evidence of anything.
+#
+# The second is the cross-system reconciliation ADR-029 exists for: the trial
+# balance finance published must agree with the postings they sent us. Exact on
+# a clean run, because the balances are derived from those same postings -- so
+# a difference is a real finding rather than noise, the property CTRL-005 and
+# CTRL-018 both depend on.
+# ---------------------------------------------------------------------------
+TRIAL_BALANCE_NETS_TO_ZERO = Check(
+    check_id="CTRL-019",
+    name="Every period's trial balance nets to zero",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "A period whose closing balances do not sum to zero means the ledger is not in "
+        "balance, so every figure drawn from it -- inventory, cost of sales, margin -- is "
+        "unsupported. It is the one assertion a trial balance exists to make."
+    ),
+    sql="""
+        select
+            'period ' || posting_period
+                || ' closing balances sum to ' || sum(closing_balance_usd)
+                as exception_detail
+        from {staging}.stg_trial_balance
+        group by posting_period
+        having sum(closing_balance_usd) <> 0
+        order by 1
+    """,
+)
+
+TRIAL_BALANCE_TO_LEDGER = Check(
+    check_id="CTRL-019",
+    name="The trial balance agrees with the general ledger postings",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "The trial balance is what finance reports; the postings are what the business "
+        "recorded. If they disagree, the reported figures are not the ones the ledger "
+        "supports, and nobody can say which of the two is wrong without this comparison."
+    ),
+    sql="""
+        with balances as (
+            select
+                gl_account,
+                posting_period,
+                -- The period's own movement, not the carried-forward balance:
+                -- comparing closing balances would make one early difference
+                -- fail every period after it, hiding where it started.
+                sum(closing_balance_usd - opening_balance_usd) as movement_usd
+            from {staging}.stg_trial_balance
+            group by gl_account, posting_period
+        ),
+
+        ledger as (
+            select
+                gl_account,
+                posting_period,
+                sum(signed_amount_usd) as movement_usd
+            from {staging}.stg_gl_postings
+            group by gl_account, posting_period
+        )
+
+        select
+            'account ' || coalesce(b.gl_account, l.gl_account)
+                || ' period ' || coalesce(b.posting_period, l.posting_period)
+                || ': trial balance ' || coalesce(b.movement_usd, 0)
+                || ', ledger ' || coalesce(l.movement_usd, 0)
+                as exception_detail
+        from balances as b
+        full outer join ledger as l
+            on
+                b.gl_account = l.gl_account
+                and b.posting_period = l.posting_period
+        where coalesce(b.movement_usd, 0) <> coalesce(l.movement_usd, 0)
+        order by 1
+    """,
+)
+
+# ---------------------------------------------------------------------------
 # CTRL-018: production consumption reconciles to inventory issues.
 #
 # The control whose absence let the two drift 58-fold apart (ADR-027).
@@ -673,6 +759,8 @@ PHASE_1_CHECKS: tuple[Check, ...] = (
     INVOICE_REFERENCES_A_PURCHASE_ORDER,
     SHIPMENT_REFERENCES_RESOLVE,
     CONSUMPTION_TO_ISSUES,
+    TRIAL_BALANCE_NETS_TO_ZERO,
+    TRIAL_BALANCE_TO_LEDGER,
     MES_TO_ERP_COMPLETION,
     SUBLEDGER_TO_GL,
     INVENTORY_VALUE_AGREES_WITH_COST,

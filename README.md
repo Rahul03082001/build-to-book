@@ -200,6 +200,16 @@ their source systems in Phase 2.
 | 1 | Duplicate goods receipts | CTRL-001 (zero rejected rows) | Preventive — rejected at load | 9 / 9 |
 | 2 | Backdated GL posting | CTRL-006 (closed-period integrity) | Preventive — blocks the publish | 4 / 4 |
 
+A third control fires on the first defect, and correctly. The duplicate
+injector repeats whole receipts **and their GL postings**, so the trial balance
+derived from those postings includes the duplicate and agrees with the file
+finance published. The loader then rejects the duplicate rows — which is the
+preventive control working — and the warehouse ledger no longer matches the
+trial balance it was given, so CTRL-019 reports the disagreement.
+
+That is not a false positive. It is what a preventive control does to a
+downstream reconciliation, and somebody has to resolve it.
+
 Reproduce with:
 
 ```bash

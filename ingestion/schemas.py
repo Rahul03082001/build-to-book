@@ -436,6 +436,24 @@ SCHEMAS: dict[str, DataFrameSchema] = {
         coerce=True,
         name="chart_of_accounts",
     ),
+    "trial_balance": DataFrameSchema(
+        {
+            "company_code": _code(),
+            "fiscal_year": _year(),
+            "posting_period": _code(),
+            "gl_account": _code(),
+            # Any of these may legitimately be negative: signed in the debit
+            # direction throughout, so a credit-balance account closes
+            # negative and that is correct rather than a fault.
+            "opening_balance_usd": _money(),
+            "debits_usd": _money(allow_negative=False),
+            "credits_usd": _money(allow_negative=False),
+            "closing_balance_usd": _money(),
+        },
+        strict=True,
+        coerce=True,
+        name="trial_balance",
+    ),
     "shipment_headers": DataFrameSchema(
         {
             "inbound_delivery": _code(),
@@ -556,6 +574,7 @@ NATURAL_KEYS: dict[str, tuple[str, ...]] = {
     # Material document numbers repeat across fiscal years (ADR-020).
     "goods_movements": ("material_document", "fiscal_year", "material_document_item"),
     "chart_of_accounts": ("gl_account",),
+    "trial_balance": ("company_code", "fiscal_year", "posting_period", "gl_account"),
     "shipment_headers": ("inbound_delivery",),
     "shipment_lines": ("inbound_delivery", "shipment_item"),
     "inventory_revaluations": ("revaluation_document", "fiscal_year"),

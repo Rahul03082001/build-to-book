@@ -447,6 +447,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS gl_postings_nk
 CREATE INDEX IF NOT EXISTS gl_postings_account_posting_idx
     ON raw.gl_postings (gl_account, posting_date);
 
+-- The monthly trial balance (BTB-35, ADR-029). One row per account per
+-- period, derived from the postings so it reconciles to the cent on a clean
+-- run -- which is what makes a disagreement a finding rather than noise.
+CREATE TABLE IF NOT EXISTS raw.trial_balance (
+    company_code        text           NOT NULL,
+    fiscal_year         integer        NOT NULL,
+    posting_period      text           NOT NULL,
+    gl_account          text           NOT NULL,
+    -- Where the period opened: the prior period's closing balance. Without it
+    -- the first period starts from nothing and a monthly trial balance is a
+    -- snapshot rather than a statement about a going concern.
+    opening_balance_usd numeric(18, 2) NOT NULL,
+    debits_usd          numeric(18, 2) NOT NULL,
+    credits_usd         numeric(18, 2) NOT NULL,
+    -- Signed in the debit direction, so a period's closing balances sum to
+    -- zero across every account. Storing each account on its own natural side
+    -- would make every consumer learn each account's sign convention.
+    closing_balance_usd numeric(18, 2) NOT NULL,
+    _batch_id           text           NOT NULL,
+    _source_file        text           NOT NULL,
+    _file_sha256        char(64)       NOT NULL,
+    _loaded_at          timestamptz    NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS trial_balance_nk
+    ON raw.trial_balance (company_code, fiscal_year, posting_period, gl_account);
+
 -- The loader writes raw; the transformer reads it. Explicit grants, because
 -- ALTER DEFAULT PRIVILEGES only covers tables created after it ran.
 DO $$

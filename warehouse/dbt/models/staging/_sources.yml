@@ -153,6 +153,28 @@ sources:
           - name: is_balance_sheet
             data_tests: [not_null]
 
+      - name: trial_balance
+        description: >
+          The monthly trial balance (ADR-029). One row per account per period,
+          with opening balance, debits, credits and closing balance. Derived by
+          finance from the same postings the warehouse loads, so a difference
+          is a real finding.
+        columns:
+          - name: gl_account
+            data_tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('raw', 'chart_of_accounts')
+                    field: gl_account
+          - name: posting_period
+            data_tests: [not_null]
+          - name: closing_balance_usd
+            description: >
+              Signed in the debit direction, so a period's closing balances
+              sum to zero across every account.
+            data_tests: [not_null]
+
       - name: shipment_headers
         description: >
           Inbound deliveries, shaped on SAP's LIKP. One row per advance ship

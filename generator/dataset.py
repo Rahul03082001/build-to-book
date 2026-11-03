@@ -30,6 +30,7 @@ from generator import (
     mes,
     production,
     shipments,
+    trial_balance,
     writers,
 )
 from generator.config import GeneratorConfig
@@ -72,6 +73,9 @@ EXTRACT_SPECS: dict[str, ExtractSpec] = {
     # Last: every posting comes from a movement, a revaluation or an order's
     # costing, so the ledger cannot be written until all three exist.
     "gl_postings": inventory.EXTRACT_SPECS["gl_postings"],
+    # Truly last: the trial balance summarises every posting, so it cannot be
+    # built until the ledger is complete (ADR-029).
+    "trial_balance": trial_balance.EXTRACT_SPECS["trial_balance"],
 }
 
 #: Extracts too large to hold in memory, written by streaming chunks
@@ -99,6 +103,8 @@ DEFERRED: frozenset[str] = frozenset(
         "goods_movements",
         # And every posting needs the movements, so the ledger is last.
         "gl_postings",
+        # And the trial balance summarises the ledger (ADR-029).
+        "trial_balance",
     }
 )
 
@@ -518,10 +524,25 @@ def build(
         build_ledger()
         return chain["postings"]
 
+    def balances() -> list[dict[str, Any]]:
+        """The trial balance, from the completed ledger.
+
+        Asserted balanced before it is returned. A trial balance that does not
+        net to zero against itself is arithmetic, not a finding -- emitting one
+        would make the control fail for a reason unrelated to the data it
+        watches.
+        """
+        if "balances" not in chain:
+            rows = trial_balance.build(postings(), inventory.COMPANY_CODE)
+            trial_balance.assert_balanced(rows)
+            chain["balances"] = rows
+        return chain["balances"]
+
     deferred: dict[str, Any] = {
         "production_confirmations": confirmations,
         "goods_movements": all_movements,
         "gl_postings": postings,
+        "trial_balance": balances,
     }
 
     extracts: dict[str, list[dict[str, Any]]] = {}
