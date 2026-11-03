@@ -183,6 +183,137 @@ models:
           arguments:
             expression: "net_value_usd = round(quantity_ordered * unit_price_usd, 2)"
 
+  - name: stg_supplier_invoice_headers
+    description: "GRAIN: one row per supplier invoice. Shaped on SAP's RBKP."
+    columns:
+      - name: invoice_number
+        data_tests: [not_null]
+      - name: supplier_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_suppliers')
+                field: supplier_number
+      - name: gross_amount_usd
+        description: Sum of the invoice's lines, asserted below.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [invoice_number, fiscal_year]
+      - dbt_utils.expression_is_true:
+          name: invoice_posts_on_or_after_its_invoice_date
+          arguments:
+            expression: "posting_date >= invoice_date"
+
+  - name: stg_supplier_invoice_lines
+    description: >
+      GRAIN: one row per invoice line. Shaped on SAP's RSEG. The third leg of
+      the three-way match: each line references the PO line it pays for.
+    columns:
+      - name: invoice_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_supplier_invoice_headers')
+                field: invoice_number
+      - name: po_number
+        description: >
+          The PO line this pays for. Referential integrity is checked by
+          CTRL-009 rather than here, because an invoice for a PO that does not
+          exist is a control finding to report, not a row to drop from the
+          build.
+        data_tests: [not_null]
+      - name: quantity_invoiced
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: invoiced_quantity_is_positive
+              arguments:
+                expression: "> 0"
+      - name: net_amount_usd
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [invoice_number, fiscal_year, invoice_item]
+      - dbt_utils.expression_is_true:
+          name: invoice_line_amount_is_quantity_times_price
+          arguments:
+            expression: "net_amount_usd = round(quantity_invoiced * unit_price_usd, 2)"
+
+  - name: stg_production_orders
+    description: >
+      GRAIN: one row per production order. `is_confirmed` and `is_complete`
+      are derived once here so no consumer has to remember which status codes
+      count as finished.
+    columns:
+      - name: order_number
+        data_tests: [unique, not_null]
+      - name: material_number
+        description: The rack configuration being built.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_materials')
+                field: material_number
+      - name: target_quantity
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: order_target_quantity_is_positive
+              arguments:
+                expression: "> 0"
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["REL", "CNF", "TECO"]
+    data_tests:
+      - dbt_utils.expression_is_true:
+          name: order_starts_before_it_finishes
+          arguments:
+            expression: "start_date <= finish_date"
+      - dbt_utils.expression_is_true:
+          name: order_is_raised_before_it_starts
+          arguments:
+            expression: "order_date <= start_date"
+
+  - name: stg_component_consumption
+    description: >
+      GRAIN: one row per consumption line. Components issued to a production
+      order, following that order's exploded BOM.
+    columns:
+      - name: order_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_production_orders')
+                field: order_number
+      - name: component_material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_materials')
+                field: material_number
+      - name: quantity_consumed
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              name: consumed_quantity_is_positive
+              arguments:
+                expression: "> 0"
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_number, consumption_item]
+
   - name: stg_goods_movements
     description: >
       GRAIN: one row per material document line. Movement type is translated

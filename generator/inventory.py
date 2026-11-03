@@ -70,6 +70,11 @@ ACCOUNT_INVENTORY_REVALUATION = "231000"  # Standard cost revaluation / price di
 DEBIT = "S"
 CREDIT = "H"
 
+# Share of receipted purchase order lines delivered short and closed short.
+# Keeps the ordered and received quantities genuinely different, which is what
+# makes the three-way match's quantity comparison meaningful.
+SHORT_DELIVERY_RATE = 0.09
+
 COMPANY_CODE = "1000"
 PLANT = "1010"
 CURRENCY = "USD"
@@ -603,12 +608,24 @@ class InventoryGenerator:
                 continue
 
             ordered = int(line["quantity_ordered"])
-            splits = 2 if (ordered >= 6 and self.rng.random() < 0.22) else 1
+
+            # A share of lines are delivered short and closed short: the
+            # supplier shipped less than ordered and the balance is never
+            # coming. Without this, every receipted line is delivered in full,
+            # so an invoice billing the received quantity and one billing the
+            # ordered quantity are indistinguishable -- and the three-way
+            # match's quantity leg can never be exercised. Found by a test
+            # asserting the two differ somewhere.
+            delivered = ordered
+            if ordered >= 4 and self.rng.random() < SHORT_DELIVERY_RATE:
+                delivered = ordered - int(self.rng.integers(1, max(2, ordered // 3)))
+
+            splits = 2 if (delivered >= 6 and self.rng.random() < 0.22) else 1
             if splits == 2:
-                first = int(self.rng.integers(1, ordered))
-                quantities = [first, ordered - first]
+                first = int(self.rng.integers(1, delivered))
+                quantities = [first, delivered - first]
             else:
-                quantities = [ordered]
+                quantities = [delivered]
 
             delivery = line["delivery_date"]
             for offset_index, quantity in enumerate(quantities):

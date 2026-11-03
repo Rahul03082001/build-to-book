@@ -168,6 +168,86 @@ CREATE UNIQUE INDEX IF NOT EXISTS goods_movements_nk
 CREATE INDEX IF NOT EXISTS goods_movements_posting_idx
     ON raw.goods_movements (posting_date);
 
+-- Supplier invoices, shaped on SAP's RBKP and RSEG. The third leg of the
+-- three-way match (CTRL-004).
+CREATE TABLE IF NOT EXISTS raw.supplier_invoice_headers (
+    invoice_number    text           NOT NULL,
+    fiscal_year       integer        NOT NULL,
+    supplier_number   text           NOT NULL,
+    invoice_date      date           NOT NULL,
+    posting_date      date           NOT NULL,
+    currency          text           NOT NULL,
+    gross_amount_usd  numeric(18, 2) NOT NULL,
+    payment_terms     text           NOT NULL,
+    entered_by        text           NOT NULL,
+    _batch_id         text           NOT NULL,
+    _source_file      text           NOT NULL,
+    _file_sha256      char(64)       NOT NULL,
+    _loaded_at        timestamptz    NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS supplier_invoice_headers_nk
+    ON raw.supplier_invoice_headers (invoice_number, fiscal_year);
+
+CREATE TABLE IF NOT EXISTS raw.supplier_invoice_lines (
+    invoice_number     text           NOT NULL,
+    fiscal_year        integer        NOT NULL,
+    invoice_item       integer        NOT NULL,
+    po_number          text           NOT NULL,
+    po_item            integer        NOT NULL,
+    material_number    text           NOT NULL,
+    quantity_invoiced  integer        NOT NULL,
+    unit_price_usd     numeric(18, 2) NOT NULL,
+    net_amount_usd     numeric(18, 2) NOT NULL,
+    uom                text           NOT NULL,
+    _batch_id          text           NOT NULL,
+    _source_file       text           NOT NULL,
+    _file_sha256       char(64)       NOT NULL,
+    _loaded_at         timestamptz    NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS supplier_invoice_lines_nk
+    ON raw.supplier_invoice_lines (invoice_number, fiscal_year, invoice_item);
+CREATE INDEX IF NOT EXISTS supplier_invoice_lines_po_idx
+    ON raw.supplier_invoice_lines (po_number, po_item);
+
+-- Production orders and their component consumption.
+CREATE TABLE IF NOT EXISTS raw.production_orders (
+    order_number     text        NOT NULL,
+    material_number  text        NOT NULL,
+    plant            text        NOT NULL,
+    target_quantity  integer     NOT NULL,
+    uom              text        NOT NULL,
+    order_date       date        NOT NULL,
+    start_date       date        NOT NULL,
+    finish_date      date        NOT NULL,
+    status           text        NOT NULL,
+    created_by       text        NOT NULL,
+    _batch_id        text        NOT NULL,
+    _source_file     text        NOT NULL,
+    _file_sha256     char(64)    NOT NULL,
+    _loaded_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS production_orders_nk
+    ON raw.production_orders (order_number);
+
+CREATE TABLE IF NOT EXISTS raw.component_consumption (
+    order_number               text        NOT NULL,
+    consumption_item           integer     NOT NULL,
+    component_material_number  text        NOT NULL,
+    quantity_consumed          integer     NOT NULL,
+    uom                        text        NOT NULL,
+    movement_type              text        NOT NULL,
+    posting_date               date        NOT NULL,
+    entered_by                 text        NOT NULL,
+    _batch_id                  text        NOT NULL,
+    _source_file               text        NOT NULL,
+    _file_sha256               char(64)    NOT NULL,
+    _loaded_at                 timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS component_consumption_nk
+    ON raw.component_consumption (order_number, consumption_item);
+CREATE INDEX IF NOT EXISTS component_consumption_material_idx
+    ON raw.component_consumption (component_material_number);
+
 CREATE TABLE IF NOT EXISTS raw.inventory_revaluations (
     revaluation_document   text           NOT NULL,
     fiscal_year            integer        NOT NULL,

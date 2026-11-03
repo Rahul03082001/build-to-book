@@ -19,8 +19,10 @@ TARGET_SCHEMA ?= reporting
 # Models build here and are swapped into reporting only if every critical
 # check passes (ADR-014, ADR-021).
 CANDIDATE_SCHEMA ?= publish_candidate
-# Schema dbt builds the marts into; the gate copies from here into reporting.
-BUILD_SCHEMA ?= marts
+# Prefix applied to every dbt layer schema. Empty for the live build; the
+# Phase 6 failure demo passes sandbox_ so it cannot rebuild production
+# staging or marts (see warehouse/dbt/macros/generate_schema_name.sql).
+SCHEMA_PREFIX ?=
 DBT_DIR       := warehouse/dbt
 VENV          := .venv
 PY            := $(VENV)/bin/python
@@ -141,19 +143,21 @@ build: ## Run dbt build (models + tests) into the candidate schema
 	@# `dbt build`, not `dbt run`: it interleaves tests with models and fails
 	@# on a failing test, so a model that breaks a business rule cannot be
 	@# published (ADR-010).
-	BTB_TARGET_SCHEMA=$(CANDIDATE_SCHEMA) $(DBT) build $(DBT_FLAGS)
+	BTB_TARGET_SCHEMA=$(CANDIDATE_SCHEMA) $(DBT) build $(DBT_FLAGS) \
+		--vars '{schema_prefix: "$(SCHEMA_PREFIX)"}'
 
 .PHONY: dbt-test
 dbt-test: ## Run dbt tests only, without rebuilding
-	BTB_TARGET_SCHEMA=$(CANDIDATE_SCHEMA) $(DBT) test $(DBT_FLAGS)
+	BTB_TARGET_SCHEMA=$(CANDIDATE_SCHEMA) $(DBT) test $(DBT_FLAGS) \
+		--vars '{schema_prefix: "$(SCHEMA_PREFIX)"}'
 
 .PHONY: controls
 controls: ## Run reconciliations and record results
-	$(PY) -m controls --schema $(BUILD_SCHEMA)
+	$(PY) -m controls --schema-prefix '$(SCHEMA_PREFIX)'
 
 .PHONY: publish
 publish: ## Swap a validated build into reporting if every critical check passes
-	$(PY) -m controls --schema $(BUILD_SCHEMA) --publish --target-schema $(TARGET_SCHEMA)
+	$(PY) -m controls --schema-prefix '$(SCHEMA_PREFIX)' --publish --target-schema $(TARGET_SCHEMA)
 
 .PHONY: lineage
 lineage: ## Generate column-level KPI lineage with sqlglot  [PHASE 5]

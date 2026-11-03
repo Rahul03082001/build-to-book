@@ -73,3 +73,52 @@ models:
       - dbt_utils.unique_combination_of_columns:
           arguments:
             combination_of_columns: [top_material_number, component_material_number]
+
+  - name: int_three_way_match
+    description: >
+      GRAIN: one row per purchase order line.
+
+      The three-way match (CTRL-004): PO line, goods receipt and supplier
+      invoice must agree on quantity and price.
+
+      EVERY PO line appears, matched or not, because the unmatched ones are the
+      finding. An inner join would hide exactly the rows worth looking at.
+      Open commitments (ORDERED_NOT_RECEIVED) and goods-received-not-invoiced
+      balances are normal and are not treated as exceptions.
+
+      Note what this model cannot see: it is driven FROM purchase order lines,
+      so an invoice line referencing a PO line that does not exist is excluded
+      by the join rather than flagged by it. CTRL-009 covers that separately.
+    columns:
+      - name: match_key
+        data_tests: [unique, not_null]
+      - name: po_number
+        data_tests: [not_null]
+      - name: match_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - MATCHED
+                  - ORDERED_NOT_RECEIVED
+                  - RECEIVED_NOT_INVOICED
+                  - INVOICED_NOT_RECEIVED
+                  - QUANTITY_MISMATCH
+                  - PRICE_MISMATCH
+      - name: quantity_ordered
+        data_tests: [not_null]
+      - name: quantity_received
+        data_tests: [not_null]
+      - name: quantity_invoiced
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [po_number, po_item]
+      # Every PO line must be classified -- a NULL status would mean a case
+      # the CASE expression does not handle.
+      - dbt_utils.expression_is_true:
+          name: every_po_line_is_classified
+          arguments:
+            expression: "match_status is not null"

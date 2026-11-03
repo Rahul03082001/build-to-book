@@ -62,7 +62,7 @@ def _reporting_total(conn: psycopg.Connection) -> decimal.Decimal | None:
 # Clean path
 # ---------------------------------------------------------------------------
 def test_a_clean_build_publishes(conn: psycopg.Connection, batch_id: str) -> None:
-    summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id)
+    summary = runner.run_checks(conn, "", batch_id)
     assert summary.passed, "the build is not clean, so the gate cannot be tested: " + "; ".join(
         r.detail or "" for r in summary.blocking_failures
     )
@@ -82,7 +82,7 @@ def test_publishing_twice_in_a_row_works(conn: psycopg.Connection, batch_id: str
     `DependentObjectsStillExist`, because the versioned table is the one the
     live view depends on. Versions are per attempt for exactly this reason.
     """
-    summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id)
+    summary = runner.run_checks(conn, "", batch_id)
     first = publish_module.publish(conn, summary, "test")
     second = publish_module.publish(conn, summary, "test")
 
@@ -95,7 +95,7 @@ def test_only_the_current_and_previous_versions_are_retained(
     conn: psycopg.Connection, batch_id: str
 ) -> None:
     """Two copies of every mart is already most of a 1 GB free tier."""
-    summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id)
+    summary = runner.run_checks(conn, "", batch_id)
     for _ in range(3):
         publish_module.publish(conn, summary, "test")
 
@@ -116,7 +116,7 @@ def test_the_reporter_role_can_read_the_published_views(
     recreated -- forgetting it would break the dashboard one run later, which
     is the same class of fault that ruled out renaming schemas (ADR-021).
     """
-    summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id)
+    summary = runner.run_checks(conn, "", batch_id)
     publish_module.publish(conn, summary, "test")
 
     with conn.cursor() as cursor:
@@ -141,7 +141,7 @@ def test_a_failed_critical_check_blocks_and_leaves_reporting_untouched(
     with an honest timestamp rather than a wrong one with a current timestamp.
     """
     # Establish a known-good published state.
-    clean = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id)
+    clean = runner.run_checks(conn, "", batch_id)
     assert clean.passed, "the build must be clean before testing the blocked path"
     publish_module.publish(conn, summary=clean, commit_sha="test")
 
@@ -168,7 +168,7 @@ def test_a_failed_critical_check_blocks_and_leaves_reporting_untouched(
         assert cursor.fetchone()[0] == 1, "nothing was removed, so nothing is broken"
 
     try:
-        broken = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id)
+        broken = runner.run_checks(conn, "", batch_id)
         assert broken.blocking_failures, "corrupting the build did not fail any check"
 
         result = publish_module.publish(conn, broken, "test")
@@ -187,7 +187,7 @@ def test_a_failed_critical_check_blocks_and_leaves_reporting_untouched(
         with conn.transaction(), conn.cursor() as cursor:
             cursor.execute("INSERT INTO marts.fct_gl_postings SELECT * FROM _removed_gl_line")
             cursor.execute("DROP TABLE IF EXISTS _removed_gl_line")
-        restored = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id)
+        restored = runner.run_checks(conn, "", batch_id)
         assert restored.passed, "the build was not restored: " + "; ".join(
             r.detail or "" for r in restored.blocking_failures
         )
@@ -248,7 +248,7 @@ def test_passing_checks_are_recorded_too(conn: psycopg.Connection, batch_id: str
     """A control whose results only appear when something is wrong cannot be
     shown to have been operating -- the first thing an auditor asks."""
     run_id = uuid.uuid4()
-    summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id, run_id=run_id)
+    summary = runner.run_checks(conn, "", batch_id, run_id=run_id)
 
     with conn.cursor() as cursor:
         cursor.execute(
@@ -268,7 +268,7 @@ def test_results_carry_expected_actual_and_difference(
 ) -> None:
     """ "The reconciliation failed" is not actionable; the difference is."""
     run_id = uuid.uuid4()
-    runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id, run_id=run_id)
+    runner.run_checks(conn, "", batch_id, run_id=run_id)
 
     with conn.cursor() as cursor:
         cursor.execute(
@@ -301,9 +301,9 @@ def test_an_unrunnable_check_is_recorded_as_a_failure(
         shape=runner.CheckShape.EXCEPTION,
         severity=runner.SEVERITY_CRITICAL,
         rationale="x" * 50,
-        sql="select * from {schema}.table_that_does_not_exist",
+        sql="select * from {marts}.table_that_does_not_exist",
     )
-    summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id, checks=(broken,))
+    summary = runner.run_checks(conn, "", batch_id, checks=(broken,))
 
     assert not summary.passed
     assert len(summary.blocking_failures) == 1
@@ -322,10 +322,10 @@ def test_an_empty_comparison_is_a_failure_not_a_pass(
         rationale="x" * 50,
         sql=(
             "select 'p'::text as period, 0::numeric as expected_value, "
-            "0::numeric as actual_value from {schema}.fct_goods_movements where false"
+            "0::numeric as actual_value from {marts}.fct_goods_movements where false"
         ),
     )
-    summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, batch_id, checks=(empty,))
+    summary = runner.run_checks(conn, "", batch_id, checks=(empty,))
 
     assert not summary.passed
     assert "nothing was compared" in (summary.results[0].detail or "")

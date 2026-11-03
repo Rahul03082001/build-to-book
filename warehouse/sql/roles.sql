@@ -71,6 +71,11 @@ GRANT USAGE, CREATE ON SCHEMA intermediate TO btb_transformer;
 GRANT USAGE, CREATE ON SCHEMA marts TO btb_transformer;
 GRANT USAGE, CREATE ON SCHEMA publish_candidate TO btb_transformer;
 GRANT USAGE, CREATE ON SCHEMA sandbox TO btb_transformer;
+-- The failure demo's own layers, so it never rebuilds production (BTB-67).
+GRANT USAGE, CREATE ON SCHEMA sandbox_staging TO btb_transformer;
+GRANT USAGE, CREATE ON SCHEMA sandbox_intermediate TO btb_transformer;
+GRANT USAGE, CREATE ON SCHEMA sandbox_marts TO btb_transformer;
+GRANT USAGE, CREATE ON SCHEMA sandbox_dbt_test_failures TO btb_transformer;
 -- The publish gate swaps schemas, so the transformer needs reporting DDL.
 GRANT USAGE, CREATE ON SCHEMA reporting TO btb_transformer;
 GRANT USAGE ON SCHEMA audit TO btb_transformer;

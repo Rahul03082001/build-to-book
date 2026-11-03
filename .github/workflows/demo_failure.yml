@@ -49,6 +49,14 @@ jobs:
     env:
       # Pinned: the failure demo never targets reporting.
       BTB_TARGET_SCHEMA: sandbox
+      # And every dbt layer is rebuilt behind this prefix, so the demo cannot
+      # overwrite production staging, intermediate or marts.
+      #
+      # BTB_TARGET_SCHEMA alone did NOT do this. With exact layer names a
+      # sandbox-targeted build put 14 models in `staging` and 8 in `marts` and
+      # none in `sandbox` -- so the guard below was checking a variable that
+      # did not control where anything landed.
+      SCHEMA_PREFIX: sandbox_
       BTB_PROFILE: demo
       BTB_DEFECT: ${{ inputs.defect }}
 
@@ -57,13 +65,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Refuse to run against reporting
+      - name: Refuse to run against production
         run: |
           if [ "$BTB_TARGET_SCHEMA" != "sandbox" ]; then
             echo "::error::The failure demo may only target the sandbox schema."
             exit 1
           fi
+          if [ "$SCHEMA_PREFIX" != "sandbox_" ]; then
+            echo "::error::SCHEMA_PREFIX must be sandbox_, or the dbt build"
+            echo "::error::would rebuild the production staging and marts schemas."
+            exit 1
+          fi
           echo "Target schema: $BTB_TARGET_SCHEMA"
+          echo "Layer prefix:  $SCHEMA_PREFIX"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7

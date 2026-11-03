@@ -71,6 +71,21 @@ def accounting_document_numbers() -> NumberRange:
     return NumberRange(prefix="01", width=10)
 
 
+def production_order_numbers() -> NumberRange:
+    """Production orders occupy the 10000xxxxx range, as SAP's AUFK does."""
+    return NumberRange(prefix="10", width=10)
+
+
+def confirmation_numbers() -> NumberRange:
+    """Order confirmations, unique within the run."""
+    return NumberRange(prefix="", width=10, start=8_000_000_000)
+
+
+def invoice_numbers() -> NumberRange:
+    """Supplier invoices occupy 51xxxxxxxx, unique within a fiscal year."""
+    return NumberRange(prefix="51", width=10)
+
+
 def bom_numbers() -> NumberRange:
     """BOM numbers occupy the 00000xxxxx range, as SAP's STKO does."""
     return NumberRange(prefix="", width=8, start=10_000_000)

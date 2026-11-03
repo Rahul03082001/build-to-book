@@ -32,7 +32,8 @@ from controls.checks import (
 from generator import config as genconfig
 
 __all__ = [
-    "ALLOWED_TARGET_SCHEMAS",
+    "ALLOWED_SCHEMA_PREFIXES",
+    "LAYERS",
     "PHASE_1_CHECKS",
     "SEVERITY_CRITICAL",
     "SEVERITY_WARNING",
@@ -48,15 +49,35 @@ __all__ = [
 #: investigating, not so many that the audit row becomes a data dump.
 EXCEPTION_SAMPLE_SIZE = 5
 
-#: Schemas a check may be pointed at. The schema name is interpolated into the
-#: SQL rather than bound as a parameter, because a parameter cannot be an
-#: identifier. An allowlist keeps that interpolation from being a way to reach
-#: anywhere else, even though the value comes from our own configuration today.
-ALLOWED_TARGET_SCHEMAS = frozenset({"publish_candidate", "reporting", "sandbox", "marts"})
+#: Schema prefixes a control run may target. The empty prefix is the live
+#: build; `sandbox_` is the Phase 6 failure demo, which must never read or
+#: write production. Schema names are interpolated into the SQL rather than
+#: bound as parameters -- a parameter cannot be an identifier -- so an
+#: allowlist keeps that interpolation from reaching anywhere else.
+ALLOWED_SCHEMA_PREFIXES = frozenset({"", "sandbox_"})
+
+#: The three layers a check may read. Named individually because a check that
+#: hardcoded `intermediate.` would read production during the sandbox demo.
+LAYERS = ("staging", "intermediate", "marts")
 
 
 class UnknownTargetSchemaError(ValueError):
-    """Raised when a check is pointed at a schema outside the allowlist."""
+    """Raised when a check is pointed at a schema prefix outside the allowlist."""
+
+
+def layer_schemas(schema_prefix: str = "") -> dict[str, str]:
+    """The schema each layer lives in, for a given prefix.
+
+    Mirrors `generate_schema_name` in dbt: a normal run reads `marts`, a
+    sandbox run reads `sandbox_marts`. The two must agree, or the controls
+    would assess a build nobody made.
+    """
+    if schema_prefix not in ALLOWED_SCHEMA_PREFIXES:
+        raise UnknownTargetSchemaError(
+            f"{schema_prefix!r} is not an allowed schema prefix; "
+            f"expected one of {sorted(ALLOWED_SCHEMA_PREFIXES)}"
+        )
+    return {layer: f"{schema_prefix}{layer}" for layer in LAYERS}
 
 
 def _parameters(batch_id: str) -> dict[str, object]:
@@ -138,12 +159,12 @@ class RunSummary:
 def _run_comparison(
     cursor: psycopg.Cursor,
     check: Check,
-    schema: str,
+    schemas: dict[str, str],
     batch_id: str,
     started: dt.datetime,
 ) -> list[CheckResult]:
     """Run a two-figures-must-agree check, one result per period."""
-    cursor.execute(check.sql.format(schema=schema), _parameters(batch_id))
+    cursor.execute(check.sql.format(**schemas), _parameters(batch_id))
     rows = cursor.fetchall()
 
     results: list[CheckResult] = []
@@ -199,12 +220,12 @@ def _run_comparison(
 def _run_exception(
     cursor: psycopg.Cursor,
     check: Check,
-    schema: str,
+    schemas: dict[str, str],
     batch_id: str,
     started: dt.datetime,
 ) -> list[CheckResult]:
     """Run a these-rows-should-not-exist check. One result, with a sample."""
-    cursor.execute(check.sql.format(schema=schema), _parameters(batch_id))
+    cursor.execute(check.sql.format(**schemas), _parameters(batch_id))
     rows = cursor.fetchall()
     count = len(rows)
     now = dt.datetime.now(dt.UTC)
@@ -234,7 +255,7 @@ def _run_exception(
 
 def run_checks(
     conn: psycopg.Connection,
-    target_schema: str,
+    schema_prefix: str,
     batch_id: str,
     run_id: uuid.UUID | None = None,
     checks: Sequence[Check] = PHASE_1_CHECKS,
@@ -247,8 +268,10 @@ def run_checks(
 
     Args:
         conn: Connection. The caller manages the transaction.
-        target_schema: Schema to check -- `publish_candidate` before a
-            publish, or `sandbox` for the failure demo.
+        schema_prefix: Which build to check. Empty for the live build,
+            `sandbox_` for the failure demo. The prefix selects all three
+            layers together, so a check cannot read one build's marts against
+            another's staging.
         batch_id: The batch being checked.
         run_id: Defaults to a fresh UUID.
         checks: Which checks to run.
@@ -256,11 +279,8 @@ def run_checks(
     Returns:
         Every result, pass and fail.
     """
-    if target_schema not in ALLOWED_TARGET_SCHEMAS:
-        raise UnknownTargetSchemaError(
-            f"{target_schema!r} is not a checkable schema; "
-            f"expected one of {sorted(ALLOWED_TARGET_SCHEMAS)}"
-        )
+    schemas = layer_schemas(schema_prefix)
+    target_schema = schemas["marts"]
 
     run_id = run_id or uuid.uuid4()
     summary = RunSummary(run_id=run_id, batch_id=batch_id, target_schema=target_schema, results=[])
@@ -271,11 +291,11 @@ def run_checks(
             with conn.transaction(), conn.cursor() as cursor:
                 if check.shape is CheckShape.COMPARISON:
                     summary.results.extend(
-                        _run_comparison(cursor, check, target_schema, batch_id, started)
+                        _run_comparison(cursor, check, schemas, batch_id, started)
                     )
                 else:
                     summary.results.extend(
-                        _run_exception(cursor, check, target_schema, batch_id, started)
+                        _run_exception(cursor, check, schemas, batch_id, started)
                     )
         except psycopg.Error as error:
             summary.results.append(

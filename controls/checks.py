@@ -50,13 +50,16 @@ class Check:
         name: Short human name, used in the publish log and the console.
         shape: How to read the result.
         severity: Only `critical` blocks a publish (ADR-010).
-        sql: Query returning the shape's expected columns. Receives
-            ``{schema}`` for the schema being checked, so the same check runs
-            against `publish_candidate`, `sandbox` or `reporting` unchanged --
-            which is what lets the failure demo run safely in Phase 6. May
-            also bind ``%(batch_id)s``, which every check that reads the audit
-            trail must use: a control assesses the run being published, not
-            every run ever recorded.
+        sql: Query returning the shape's expected columns. Names the layer
+            it reads as ``{marts}``, ``{intermediate}`` or ``{staging}``, so
+            the same check runs against a sandbox build without reading
+            production. Hardcoding a layer was a real hole: two checks read
+            `intermediate.` and `staging.` directly, which would have made the
+            Phase 6 failure demo assess live data while claiming not to.
+
+            May also bind ``%(batch_id)s``, which every check reading the
+            audit trail must use: a control assesses the run being published,
+            not every run ever recorded.
         tolerance: Permitted absolute difference. Zero everywhere in Phase 1:
             both sides of every comparison are two-decimal-place decimals by
             construction, so any difference is real. A materiality-based
@@ -96,13 +99,13 @@ SUBLEDGER_TO_GL = Check(
     sql="""
         with movements as (
             select posting_period, sum(amount_usd) as amount_usd
-            from {schema}.fct_goods_movements
+            from {marts}.fct_goods_movements
             group by posting_period
         ),
 
         revaluations as (
             select posting_period, sum(amount_usd) as amount_usd
-            from {schema}.fct_inventory_revaluations
+            from {marts}.fct_inventory_revaluations
             group by posting_period
         ),
 
@@ -118,7 +121,7 @@ SUBLEDGER_TO_GL = Check(
 
         ledger as (
             select posting_period, sum(signed_amount_usd) as amount_usd
-            from {schema}.fct_gl_postings
+            from {marts}.fct_gl_postings
             where gl_account = '130000'
             group by posting_period
         )
@@ -188,17 +191,17 @@ RAW_TO_MART_COMPLETENESS = Check(
         select
             'goods_movements'                                       as period,
             (select count(*) from raw.goods_movements)::numeric      as expected_value,
-            (select count(*) from {schema}.fct_goods_movements)::numeric as actual_value
+            (select count(*) from {marts}.fct_goods_movements)::numeric as actual_value
         union all
         select
             'gl_postings',
             (select count(*) from raw.gl_postings)::numeric,
-            (select count(*) from {schema}.fct_gl_postings)::numeric
+            (select count(*) from {marts}.fct_gl_postings)::numeric
         union all
         select
             'inventory_revaluations',
             (select count(*) from raw.inventory_revaluations)::numeric,
-            (select count(*) from {schema}.fct_inventory_revaluations)::numeric
+            (select count(*) from {marts}.fct_inventory_revaluations)::numeric
         order by 1
     """,
 )
@@ -219,7 +222,7 @@ NO_NEGATIVE_ON_HAND = Check(
         select
             material_number || ' in ' || posting_period || ': closing quantity '
                 || closing_quantity as exception_detail
-        from {schema}.mart_inventory_balance
+        from {marts}.mart_inventory_balance
         where closing_quantity < 0
         order by 1
     """,
@@ -255,7 +258,7 @@ INVENTORY_VALUE_AGREES_WITH_COST = Check(
                     date_trunc('month', to_date(posting_period, 'YYYY-MM'))
                     + interval '1 month - 1 day'
                 )::date as period_end
-            from {schema}.mart_inventory_balance
+            from {marts}.mart_inventory_balance
         )
 
         select
@@ -264,7 +267,7 @@ INVENTORY_VALUE_AGREES_WITH_COST = Check(
                 || m.standard_cost_usd || ' = '
                 || round(p.closing_quantity * m.standard_cost_usd, 2) as exception_detail
         from period_ends as p
-        inner join {schema}.dim_material as m
+        inner join {marts}.dim_material as m
             on m.material_number = p.material_number
             and p.period_end between m.valid_from and m.valid_to
         where p.closing_value_usd <> round(p.closing_quantity * m.standard_cost_usd, 2)
@@ -288,7 +291,7 @@ GL_DOCUMENTS_BALANCE = Check(
         select
             'document ' || accounting_document || '/' || fiscal_year
                 || ' nets to ' || sum(signed_amount_usd) as exception_detail
-        from {schema}.fct_gl_postings
+        from {marts}.fct_gl_postings
         group by accounting_document, fiscal_year
         having sum(signed_amount_usd) <> 0
         order by 1
@@ -369,7 +372,7 @@ CLOSED_PERIOD_INTEGRITY = Check(
                     + interval '1 month - 1 day'
                     + (%(close_lag_days)s || ' days')::interval
                 )::date as period_closed_on
-            from {schema}.fct_gl_postings
+            from {marts}.fct_gl_postings
         )
 
         select
@@ -385,6 +388,89 @@ CLOSED_PERIOD_INTEGRITY = Check(
 )
 
 
+# ---------------------------------------------------------------------------
+# CTRL-004: three-way match.
+#
+# A supplier paid for goods never ordered or never received, or at a price
+# nobody agreed. One of the oldest controls in accounts payable, and the first
+# one here that needed a whole source system (BTB-31) before it could exist.
+#
+# Only the genuine exceptions are findings. `ORDERED_NOT_RECEIVED` is an open
+# commitment and `RECEIVED_NOT_INVOICED` is a real goods-received-not-invoiced
+# balance at period end -- both are normal, and flagging them would bury the
+# three statuses that matter in a hundred that do not.
+# ---------------------------------------------------------------------------
+THREE_WAY_MATCH = Check(
+    check_id="CTRL-004",
+    name="PO line, goods receipt and invoice agree on quantity and price",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "A supplier paid for goods that were never ordered or never received, or at a price "
+        "nobody agreed. Open commitments and goods-received-not-invoiced balances are normal "
+        "and deliberately not treated as exceptions."
+    ),
+    sql="""
+        select
+            'PO ' || po_number || '/' || po_item || ' (' || material_number || '): '
+                || match_status
+                || ' -- ordered ' || quantity_ordered
+                || ', received ' || quantity_received
+                || ', invoiced ' || quantity_invoiced
+                || ', PO price ' || po_unit_price_usd
+                || ', invoiced price ' || coalesce(invoiced_unit_price_usd::text, 'n/a')
+                as exception_detail
+        -- The match lives in `intermediate`, not in the mart schema: it is
+        -- business logic over three sources rather than a published fact.
+        from {intermediate}.int_three_way_match
+        where match_status in (
+            'INVOICED_NOT_RECEIVED', 'QUANTITY_MISMATCH', 'PRICE_MISMATCH'
+        )
+        order by 1
+    """,
+)
+
+# ---------------------------------------------------------------------------
+# CTRL-009: every invoice line references a real purchase order line.
+#
+# Found by testing CTRL-004 rather than by reading it. The three-way match is
+# driven FROM purchase order lines, so an invoice line referencing a PO line
+# that does not exist appears nowhere in the match -- it is excluded by the
+# join rather than flagged by it. An orphan invoice line sat in raw and nothing
+# reported it.
+#
+# The match answers "did this PO get received and invoiced correctly?", which
+# is a different question from "is this invoice for anything we ordered?". The
+# second needs its own check; widening the match to a full outer join would
+# have conflated the two and made its status column mean two things.
+# ---------------------------------------------------------------------------
+INVOICE_REFERENCES_A_PURCHASE_ORDER = Check(
+    check_id="CTRL-009",
+    name="Every invoice line references a real purchase order line",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "An invoice line pointing at a purchase order line that does not exist is a payment "
+        "for something nobody ordered. It is invisible to the three-way match, which is "
+        "driven from purchase order lines and therefore excludes it rather than flagging it."
+    ),
+    sql="""
+        select
+            'invoice ' || l.invoice_number || '/' || l.fiscal_year
+                || ' item ' || l.invoice_item
+                || ' references PO ' || l.po_number || '/' || l.po_item
+                || ', which does not exist' as exception_detail
+        from {staging}.stg_supplier_invoice_lines as l
+        where not exists (
+            select 1
+            from {staging}.stg_purchase_order_lines as p
+            where p.po_number = l.po_number
+              and p.po_item = l.po_item
+        )
+        order by 1
+    """,
+)
+
 #: Checks that run in Phase 1, in the order they are reported.
 #:
 #: CTRL-006 arrived with BTB-27, once the generator emitted `entered_on`. It
@@ -396,6 +482,8 @@ PHASE_1_CHECKS: tuple[Check, ...] = (
     NO_REJECTED_ROWS,
     RAW_TO_MART_COMPLETENESS,
     GL_DOCUMENTS_BALANCE,
+    THREE_WAY_MATCH,
+    INVOICE_REFERENCES_A_PURCHASE_ORDER,
     SUBLEDGER_TO_GL,
     INVENTORY_VALUE_AGREES_WITH_COST,
     NO_NEGATIVE_ON_HAND,

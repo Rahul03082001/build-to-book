@@ -105,7 +105,7 @@ Built in vertical slices, so there is always something runnable
 | --- | --- | --- |
 | **0** | Repo skeleton, 19 ADRs, backlog, CI, warehouse roles | **Complete** |
 | 1 | Inventory slice end to end, deployed live | **In progress** — pipeline, controls and planted defects done (BTB-10…BTB-23, BTB-26, BTB-27, BTB-76); live deployment outstanding |
-| 2 | All four source systems, 13 planted defects at volume | **In progress** — BOMs and the streaming writer done (BTB-30) |
+| 2 | All four source systems, 13 planted defects at volume | **In progress** — BOMs, invoices, production orders (BTB-30…BTB-32) |
 | 3 | Full star schema in dbt, plus a performance tuning study | Not started |
 | 4 | Reconciliations, evidence packs, access review, control matrix | Not started |
 | 5 | Column-level lineage with a CI gate | Not started |
@@ -143,7 +143,7 @@ PostgreSQL 16.15):
 
 | Result | Command |
 | --- | --- |
-| 313 unit tests pass | `make test` |
+| 349 unit tests pass | `make test` |
 | 37 role-permission integration tests pass | `make init && .venv/bin/pytest -m integration` |
 | Lint clean: ruff check, ruff format, sqlfluff | `make lint` |
 | Warehouse starts healthy, 9 schemas created | `make up` |
@@ -155,7 +155,7 @@ PostgreSQL 16.15):
 | Audit trail refuses UPDATE, DELETE **and** TRUNCATE | `.venv/bin/pytest -k refuses_modification` |
 | Source-side duplicate rejected while a rerun is skipped | `.venv/bin/pytest -k in_file_duplicate` |
 | A one-cent trailer mismatch is caught with the row count intact | `.venv/bin/pytest -k value_total` |
-| 219 dbt nodes build and pass: 18 models, 201 tests | `make build` |
+| 280 dbt nodes build and pass: 23 models, 257 tests | `make build` |
 | Closing inventory = quantity × cost in force, every material and period | `make build` (singular test) |
 | Subledger ties to GL account 130000 to the cent, in SQL | `make build` (singular test) |
 | An as-of join to the Type 2 dimension returns exactly one row per fact | `make build` (singular test) |
@@ -165,9 +165,11 @@ PostgreSQL 16.15):
 | 2 of 13 defects planted and detected, counts matching the manifest exactly | `make data-defects && make load && make build && make controls` |
 | BOM explosion matches an independent two-level calculation | `make build` (singular test) |
 | Writer memory flat at 91 MB from 100k to 5M rows | `.venv/bin/pytest -k streaming_memory` |
+| Three-way match: 937 matched, 0 price or quantity exceptions on clean data | `make controls` |
+| A sandbox build leaves production marts byte-identical | `make build SCHEMA_PREFIX=sandbox_` |
 | Subledger ties to GL to the cent, every period | `.venv/bin/pytest -k subledger_ties` |
 | Closing inventory = quantity × current standard cost, per material | `.venv/bin/pytest -k closing_value` |
-| CI green on `main`: lint + all 403 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
+| CI green on `main`: lint + all 439 tests, roles applied | [Actions](https://github.com/Rahul03082001/build-to-book/actions/workflows/ci.yml) |
 | Direct push to `main` rejected: `GH006 ... protected branch hook declined` | `git commit --allow-empty -m "BTB-0: test" && git push origin main` |
 
 The role tests were also confirmed to **fail** when a privilege is deliberately
@@ -230,6 +232,8 @@ build-to-book/
 │   ├── config.yaml           demo and full profiles, seed, 13 defect switches
 │   ├── dataset.py            composes the source-system generators
 │   ├── bom.py                multi-level bills of materials
+│   ├── invoices.py           supplier invoices (three-way match)
+│   ├── production.py         production orders and consumption
 │   ├── defects.py            defect registry and manifest contract
 │   └── injectors.py          the defect injectors
 ├── ingestion/                validated, incremental, idempotent loaders

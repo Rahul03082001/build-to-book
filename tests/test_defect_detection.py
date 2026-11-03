@@ -103,7 +103,7 @@ def both_defects(
     _reset_raw(conn)
     clean_load = _load_all(conn, root / "clean")
     _dbt_build()
-    clean_summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, clean_load["batch_id"])
+    clean_summary = runner.run_checks(conn, "", clean_load["batch_id"])
     if not clean_summary.passed:
         pytest.fail(
             "the clean dataset did not pass its own controls: "
@@ -118,7 +118,7 @@ def both_defects(
     manifest = _generate(root / "dirty", ("duplicate_goods_receipt", "backdated_gl_posting"))
     dirty_load = _load_all(conn, root / "dirty")
     _dbt_build()
-    dirty_summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, dirty_load["batch_id"])
+    dirty_summary = runner.run_checks(conn, "", dirty_load["batch_id"])
     result = publish_module.publish(conn, dirty_summary, "test")
 
     return {
@@ -143,7 +143,7 @@ def backdated_only(
     _reset_raw(conn)
     load = _load_all(conn, root)
     _dbt_build()
-    summary = runner.run_checks(conn, publish_module.BUILD_SCHEMA, load["batch_id"])
+    summary = runner.run_checks(conn, "", load["batch_id"])
     return {"manifest": manifest, "load": load, "summary": summary}
 
 

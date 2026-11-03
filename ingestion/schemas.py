@@ -237,6 +237,76 @@ SCHEMAS: dict[str, DataFrameSchema] = {
         coerce=True,
         name="purchase_order_lines",
     ),
+    "supplier_invoice_headers": DataFrameSchema(
+        {
+            "invoice_number": _code(),
+            "fiscal_year": _year(),
+            "supplier_number": _code(),
+            "invoice_date": _date(),
+            "posting_date": _date(),
+            "currency": _code(["USD"]),
+            "gross_amount_usd": _money(allow_negative=False),
+            "payment_terms": _code(),
+            "entered_by": _code(),
+        },
+        strict=True,
+        coerce=True,
+        name="supplier_invoice_headers",
+    ),
+    "supplier_invoice_lines": DataFrameSchema(
+        {
+            "invoice_number": _code(),
+            "fiscal_year": _year(),
+            "invoice_item": _positive_int(),
+            # Every invoice line references a PO line. A line without one is
+            # the receipt_without_po family of defect, which belongs in the
+            # three-way match control rather than in validation.
+            "po_number": _code(),
+            "po_item": _positive_int(),
+            "material_number": _code(),
+            "quantity_invoiced": _positive_int(),
+            "unit_price_usd": _money(allow_negative=False),
+            "net_amount_usd": _money(allow_negative=False),
+            "uom": _code(),
+        },
+        strict=True,
+        coerce=True,
+        name="supplier_invoice_lines",
+    ),
+    "production_orders": DataFrameSchema(
+        {
+            "order_number": _code(),
+            "material_number": _code(),
+            "plant": _code(),
+            # An order for zero units would consume components to build
+            # nothing.
+            "target_quantity": _positive_int(),
+            "uom": _code(),
+            "order_date": _date(),
+            "start_date": _date(),
+            "finish_date": _date(),
+            "status": _code(["REL", "CNF", "TECO"]),
+            "created_by": _code(),
+        },
+        strict=True,
+        coerce=True,
+        name="production_orders",
+    ),
+    "component_consumption": DataFrameSchema(
+        {
+            "order_number": _code(),
+            "consumption_item": _positive_int(),
+            "component_material_number": _code(),
+            "quantity_consumed": _positive_int(),
+            "uom": _code(),
+            "movement_type": _code(["261"]),
+            "posting_date": _date(),
+            "entered_by": _code(),
+        },
+        strict=True,
+        coerce=True,
+        name="component_consumption",
+    ),
     "goods_movements": DataFrameSchema(
         {
             "material_document": _code(),
@@ -326,6 +396,11 @@ NATURAL_KEYS: dict[str, tuple[str, ...]] = {
     "standard_costs": ("material_number", "valid_from"),
     "bom_headers": ("bom_number",),
     "bom_items": ("bom_number", "bom_item"),
+    # Invoice numbers repeat across fiscal years, like material documents.
+    "supplier_invoice_headers": ("invoice_number", "fiscal_year"),
+    "supplier_invoice_lines": ("invoice_number", "fiscal_year", "invoice_item"),
+    "production_orders": ("order_number",),
+    "component_consumption": ("order_number", "consumption_item"),
     "purchase_order_headers": ("po_number",),
     "purchase_order_lines": ("po_number", "po_item"),
     # Material document numbers repeat across fiscal years (ADR-020).

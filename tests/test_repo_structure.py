@@ -46,6 +46,8 @@ REQUIRED_FILES = [
     "generator/defects.py",
     "generator/injectors.py",
     "generator/bom.py",
+    "generator/invoices.py",
+    "generator/production.py",
     "generator/dataset.py",
     "generator/ids.py",
     "generator/inventory.py",
@@ -169,16 +171,28 @@ def test_workflow_is_valid_yaml(repo_root: pathlib.Path, workflow: str) -> None:
     assert parsed.get("jobs"), f"{workflow} declares no jobs"
 
 
-def test_failure_demo_targets_sandbox_only(repo_root: pathlib.Path) -> None:
-    """The failure demo must never be able to touch the certified dataset.
+def test_failure_demo_cannot_touch_production(repo_root: pathlib.Path) -> None:
+    """The failure demo must never be able to touch production data.
 
-    Two layers: the target schema is pinned in the workflow env, and the first
-    step refuses to continue if it is anything but `sandbox`.
+    Pinning BTB_TARGET_SCHEMA alone was not enough, and the earlier version of
+    this test checked exactly that insufficient guard. dbt builds each layer
+    into a fixed schema, so a sandbox-targeted run put 14 models in `staging`
+    and 8 in `marts` and none in `sandbox` -- while the workflow asserted the
+    live data was safe.
+
+    Both guards are now required: the target schema *and* the layer prefix that
+    actually decides where the build lands.
     """
     text = (repo_root / ".github" / "workflows" / "demo_failure.yml").read_text()
-    assert "BTB_TARGET_SCHEMA: sandbox" in text, "demo_failure.yml does not pin the sandbox schema"
-    assert "Refuse to run against reporting" in text, (
-        "demo_failure.yml has no guard step refusing a non-sandbox target"
+    assert "BTB_TARGET_SCHEMA: sandbox" in text, (
+        "demo_failure.yml does not pin the sandbox target schema"
+    )
+    assert "SCHEMA_PREFIX: sandbox_" in text, (
+        "demo_failure.yml does not pin the layer prefix, so a build would "
+        "overwrite production staging and marts"
+    )
+    assert 'if [ "$SCHEMA_PREFIX" != "sandbox_" ]' in text, (
+        "demo_failure.yml has no guard refusing a non-sandbox layer prefix"
     )
 
 
