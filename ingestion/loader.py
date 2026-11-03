@@ -245,8 +245,44 @@ def _read_control_totals(csv_path: pathlib.Path, suffix: str) -> dict[str, Any]:
     return json.loads(sidecar.read_text())
 
 
-def _validate(extract_name: str, frame: pd.DataFrame) -> tuple[pd.DataFrame, list[RejectedRow]]:
-    """Validate, returning the surviving rows and the quarantined ones."""
+#: Rows read, validated and staged at a time.
+#:
+#: Loading used to read the whole extract into one DataFrame, which peaked at
+#: 4.0 GB on the full profile's 5,000,000 MES events -- almost exactly the
+#: 4.3 GB that ADR-024 cites for holding them as dicts. Generation streams to
+#: avoid that; the loader then undid the whole benefit one step downstream, and
+#: BTB-36 asks for loading to be chunked as well.
+#:
+#: 100,000 rows is large enough that per-chunk overhead and round trips are
+#: noise, and small enough that peak memory is a function of the chunk rather
+#: than the file.
+CHUNK_ROWS = 100_000
+
+#: Synthetic column on the staging table holding each row's line number in the
+#: source file.
+#:
+#: Needed because in-file duplicate detection moved from pandas to SQL. A
+#: duplicate can straddle a chunk boundary, so a per-chunk check would miss
+#: exactly the fault CTRL-001 depends on -- and the surplus has to be
+#: identified as "not the first occurrence", which needs an ordering the
+#: staging table did not otherwise have. It also keeps the reject log's row
+#: numbers true to the file.
+SOURCE_ROW_COLUMN = "_source_row"
+
+
+def _validate(
+    extract_name: str, frame: pd.DataFrame, row_offset: int = 0
+) -> tuple[pd.DataFrame, list[RejectedRow]]:
+    """Validate, returning the surviving rows and the quarantined ones.
+
+    Args:
+        extract_name: Which schema to validate against.
+        frame: The rows to validate -- one chunk of the file.
+        row_offset: How many rows of the file precede this chunk, so a
+            rejected row's reported line number is its line in the FILE. A
+            per-chunk index would restart at every chunk and send a reader to
+            the wrong line.
+    """
     schema = schemas.schema_for(extract_name)
     try:
         return schema.validate(frame, lazy=True), []
@@ -267,7 +303,7 @@ def _validate(extract_name: str, frame: pd.DataFrame) -> tuple[pd.DataFrame, lis
         rejected = [
             RejectedRow(
                 # +2: one for the header, one because files are 1-based.
-                source_row=index + 2,
+                source_row=row_offset + index + 2,
                 rule=REJECT_SCHEMA_VIOLATION,
                 detail="; ".join(reasons.get(index, ["schema violation"])),
                 raw_row={k: (None if pd.isna(v) else str(v)) for k, v in frame.iloc[index].items()},
@@ -281,42 +317,6 @@ def _validate(extract_name: str, frame: pd.DataFrame) -> tuple[pd.DataFrame, lis
         # Re-validate the survivors so the returned frame is coerced. Any
         # remaining failure is schema-level, not row-level, and must surface.
         return schema.validate(surviving, lazy=True), rejected
-
-
-def _reject_in_file_duplicates(
-    extract_name: str, frame: pd.DataFrame
-) -> tuple[pd.DataFrame, list[RejectedRow]]:
-    """Quarantine rows duplicating their natural key within this file (BTB-76).
-
-    This is the distinction the duplicate-receipt control depends on. A row
-    already in `raw` from an earlier run is a rerun and is *skipped*. A row
-    appearing twice in the same file means the upstream interface posted twice
-    and is *rejected*. Both would look identical to a loader that only counted
-    inserts.
-
-    The first occurrence is kept, so the legitimate posting still loads and
-    only the surplus is quarantined.
-    """
-    key = list(schemas.natural_key_for(extract_name))
-    duplicated = frame.duplicated(subset=key, keep="first")
-    if not duplicated.any():
-        return frame, []
-
-    rejected = [
-        RejectedRow(
-            source_row=int(position) + 2,
-            rule=REJECT_DUPLICATE_NATURAL_KEY,
-            detail=(
-                f"natural key {tuple(key)} = "
-                f"{tuple(str(frame.iloc[position][column]) for column in key)} "
-                f"appears more than once in this file"
-            ),
-            raw_row={k: (None if pd.isna(v) else str(v)) for k, v in frame.iloc[position].items()},
-        )
-        for position in range(len(frame))
-        if bool(duplicated.iloc[position])
-    ]
-    return frame.loc[~duplicated.to_numpy()], rejected
 
 
 def _create_staging_table(
@@ -336,6 +336,14 @@ def _create_staging_table(
             sql.Identifier(extract_name),
         )
     )
+    # The source row number, which the target does not carry. Used to find the
+    # FIRST occurrence of a duplicated natural key across the whole staged
+    # file, and to report a rejected row's true line number.
+    cursor.execute(
+        sql.SQL("ALTER TABLE {}.{} ADD COLUMN {} bigint").format(
+            sql.Identifier(RAW_SCHEMA), staging, sql.Identifier(SOURCE_ROW_COLUMN)
+        )
+    )
 
 
 def _copy_into_staging(
@@ -352,6 +360,70 @@ def _copy_into_staging(
     with cursor.copy(statement) as copy:
         for row in rows:
             copy.write_row(row)
+
+
+def _reject_staged_duplicates(
+    cursor: psycopg.Cursor,
+    extract_name: str,
+    staging: sql.Identifier,
+    business_columns: Sequence[str],
+) -> list[RejectedRow]:
+    """Quarantine staged rows duplicating their natural key within this file.
+
+    The distinction the duplicate-receipt control depends on. A row already in
+    `raw` from an earlier run is a rerun and is *skipped*. A row appearing
+    twice in the same file means the upstream interface posted twice and is
+    *rejected*. Both would look identical to a loader that only counted
+    inserts (BTB-76, ADR-020).
+
+    Done in SQL across the whole staged file rather than per chunk in pandas.
+    A duplicate can straddle a chunk boundary, and a per-chunk check would miss
+    it -- which would silently turn a rejected duplicate into an inserted one
+    and leave CTRL-001 with nothing to find. Doing it here also costs no memory
+    at all, which is the point of chunking in the first place.
+
+    The first occurrence is kept, so the legitimate posting still loads and
+    only the surplus is quarantined.
+    """
+    key = list(schemas.natural_key_for(extract_name))
+    key_columns = sql.SQL(", ").join(sql.Identifier(column) for column in key)
+    returning = sql.SQL(", ").join(
+        sql.Identifier(column) for column in [*business_columns, SOURCE_ROW_COLUMN]
+    )
+
+    cursor.execute(
+        sql.SQL(
+            "DELETE FROM {raw}.{staging} "
+            "WHERE {source_row} NOT IN ("
+            "    SELECT min({source_row}) FROM {raw}.{staging} GROUP BY {key}"
+            ") "
+            "RETURNING {returning}"
+        ).format(
+            raw=sql.Identifier(RAW_SCHEMA),
+            staging=staging,
+            source_row=sql.Identifier(SOURCE_ROW_COLUMN),
+            key=key_columns,
+            returning=returning,
+        )
+    )
+
+    rejected: list[RejectedRow] = []
+    for row in cursor.fetchall():
+        values = dict(zip([*business_columns, SOURCE_ROW_COLUMN], row, strict=True))
+        source_row = values.pop(SOURCE_ROW_COLUMN)
+        rejected.append(
+            RejectedRow(
+                source_row=int(source_row),
+                rule=REJECT_DUPLICATE_NATURAL_KEY,
+                detail=(
+                    f"natural key {tuple(key)} = "
+                    f"{tuple(str(values[column]) for column in key)} "
+                    "appears more than once in this file"
+                ),
+                raw_row={k: (None if v is None else str(v)) for k, v in values.items()},
+            )
+        )
+    return rejected
 
 
 def _insert_new_rows(
@@ -499,26 +571,19 @@ def load_extract(
             f"correctness depends on the key -- refusing to guess (ADR-020)."
         )
 
+    # Streams the file; never holds it. The digest has always been computed
+    # this way, and as of BTB-36 so is everything else below.
     digest = file_sha256(csv_path)
-    raw_frame = pd.read_csv(csv_path, dtype=str, keep_default_na=True)
-    rows_in_file = len(raw_frame)
 
     control_total_value = control_totals.get("value_total")
-
-    # Sum the declared value column from the file's own rows -- every parsed
-    # row, including any later rejected, because the trailer describes the file
-    # as it arrived rather than what survived validation.
     value_column = control_totals.get("value_column")
+
+    # Totals accumulated across chunks rather than taken from a whole frame.
+    # The value total covers every parsed row INCLUDING any later rejected,
+    # because the trailer describes the file as it arrived rather than what
+    # survived validation.
+    rows_in_file = 0
     value_total_in_file: decimal.Decimal | None = None
-    if value_column and value_column in raw_frame.columns:
-        value_total_in_file = sum(
-            (
-                decimal.Decimal(str(value))
-                for value in raw_frame[value_column]
-                if value is not None and str(value) not in ("", "nan")
-            ),
-            decimal.Decimal("0"),
-        )
 
     result = LoadResult(
         run_id=run_id,
@@ -543,11 +608,7 @@ def load_extract(
     loaded_at = dt.datetime.now(dt.UTC)
 
     try:
-        valid_frame, schema_rejects = _validate(extract_name, raw_frame)
-        valid_frame, duplicate_rejects = _reject_in_file_duplicates(extract_name, valid_frame)
-        rejects = [*schema_rejects, *duplicate_rejects]
-        result.rows_rejected = len(rejects)
-
+        rejects: list[RejectedRow] = []
         business_columns = list(schemas.schema_for(extract_name).columns)
         provenance = {
             BATCH_ID_COLUMN: batch_id,
@@ -556,18 +617,62 @@ def load_extract(
             LOADED_AT_COLUMN: loaded_at,
         }
         all_columns = [*business_columns, *provenance]
+        staging_columns = [*all_columns, SOURCE_ROW_COLUMN]
 
         with conn.transaction(), conn.cursor() as cursor:
             _create_staging_table(cursor, extract_name, staging)
 
             staged = 0
-            if not valid_frame.empty:
+            # One chunk at a time: read, total, validate, stage. Peak memory is
+            # a function of CHUNK_ROWS rather than of the file, which is what
+            # BTB-36 asks for and what the whole-frame read defeated.
+            for raw_chunk in pd.read_csv(
+                csv_path, dtype=str, keep_default_na=True, chunksize=CHUNK_ROWS
+            ):
+                row_offset = rows_in_file
+                rows_in_file += len(raw_chunk)
+
+                if value_column and value_column in raw_chunk.columns:
+                    if value_total_in_file is None:
+                        value_total_in_file = decimal.Decimal("0")
+                    value_total_in_file += sum(
+                        (
+                            decimal.Decimal(str(value))
+                            for value in raw_chunk[value_column]
+                            if value is not None and str(value) not in ("", "nan")
+                        ),
+                        decimal.Decimal("0"),
+                    )
+
+                valid_frame, schema_rejects = _validate(extract_name, raw_chunk, row_offset)
+                rejects.extend(schema_rejects)
+                if valid_frame.empty:
+                    continue
+
                 frame = valid_frame.copy()
                 for column, value in provenance.items():
                     frame[column] = value
-                rows = _to_db_rows(frame, all_columns)
-                _copy_into_staging(cursor, staging, all_columns, rows)
-                staged = len(rows)
+                # The row's line in the file: +2 for the header and 1-based
+                # counting, matching how a rejected row is reported.
+                frame[SOURCE_ROW_COLUMN] = [
+                    row_offset + position + 2 for position in range(len(frame))
+                ]
+                rows = _to_db_rows(frame, staging_columns)
+                _copy_into_staging(cursor, staging, staging_columns, rows)
+                staged += len(rows)
+
+            # Across the whole staged file, not per chunk: a duplicate can
+            # straddle a chunk boundary.
+            if staged:
+                duplicate_rejects = _reject_staged_duplicates(
+                    cursor, extract_name, staging, business_columns
+                )
+                rejects.extend(duplicate_rejects)
+                staged -= len(duplicate_rejects)
+
+            result.rows_rejected = len(rejects)
+            result.rows_in_file = rows_in_file
+            result.value_total_in_file = value_total_in_file
 
             inserted = _insert_new_rows(cursor, extract_name, staging, all_columns) if staged else 0
             result.rows_inserted = inserted

@@ -1730,6 +1730,54 @@ depends on it.
 - Jira: BTB-33 | PR/commit: BTB-30-bom-and-streaming-writer
 - Area: Data
 
+> **Amendment 2026-11-03, measured at volume (BTB-36).** The decision below
+> stands. What it did not cover is the other end of the pipe: the writer
+> streams, and the **loader** then read each extract into a single DataFrame.
+> On the full profile's 5,000,000 MES events that peaked at **4.0 GB** --
+> almost exactly the 4.3 GB this entry cites for holding them as dicts. The
+> streaming was not wrong; it had simply been moved one step downstream, and
+> nothing measured the step it moved to.
+>
+> Loading now reads, validates and stages 100,000 rows at a time. Measured
+> like for like, both skipping all five million rows:
+>
+> | | peak RSS | elapsed |
+> |---|---|---|
+> | whole-frame read | 4.00 GB | 105.9s |
+> | chunked | 0.48 GB | 119.5s |
+>
+> Eighty-eight per cent less memory for thirteen per cent more time, which is
+> the trade this entry already argues for.
+>
+> One consequence is worth recording, because it is the part that could have
+> gone wrong silently. In-file duplicate detection used pandas over the whole
+> frame. A duplicate whose two rows fall in different chunks would be invisible
+> to a per-chunk check -- each chunk sees the key once -- so a rejected
+> duplicate would have become an inserted one and CTRL-001 would have had
+> nothing to find. Detection moved to SQL over the whole staged file, which
+> costs no memory and cannot miss a straddling pair. A test makes the first and
+> last rows of a file identical with a chunk size of two, so they cannot share
+> a chunk.
+>
+> Full pipeline at target volume, on a laptop:
+>
+> | step | elapsed | peak RSS |
+> |---|---|---|
+> | generate | 56.9s | 0.50 GB |
+> | load (5,732,890 rows) | 171.8s | 0.50 GB |
+> | dbt build (381 nodes) | 21.8s | 0.20 GB |
+> | controls (22/22) | 3.7s | 0.14 GB |
+>
+> Peak memory never exceeds 0.50 GB at any step. The resulting database is
+> 1,931 MB, which is why the hosted demo runs the `demo` profile (ADR-016) --
+> that is now a measured figure against Neon's 1 GB cap rather than an
+> assumption. The `demo` profile's own warehouse is 72-73 MB, including the
+> publish gate's retained versions and the failure-demo sandbox -- a range
+> rather than a figure, because the gate keeps two versions of each mart and
+> the total moves by about a megabyte with how many publishes a database has
+> seen. Measured twice, at 72 MB and 73 MB, which is why it is quoted as a
+> range instead of whichever number was taken last.
+
 ### Context
 
 The MES feed is the first extract where volume is a real consideration: the

@@ -598,3 +598,160 @@ def test_this_module_covers_every_declared_extract() -> None:
     )
     unknown = sorted(set(LOAD_ORDER) - set(dataset.LOAD_ORDER))
     assert not unknown, f"extract(s) tested here that the generator does not produce: {unknown}"
+
+
+# ---------------------------------------------------------------------------
+# Chunked loading (BTB-36)
+#
+# Loading used to read the whole extract into one DataFrame, which peaked at
+# 4.0 GB on the full profile's 5,000,000 MES events -- almost exactly the
+# 4.3 GB ADR-024 cites for holding them as dicts. Generation streams to avoid
+# that; the loader undid the benefit one step downstream.
+#
+# Chunking introduces one genuinely new risk, and it is the subject of the
+# first test below: in-file duplicate detection must still see a duplicate
+# whose two rows land in DIFFERENT chunks. Missing it would silently turn a
+# rejected duplicate into an inserted one and leave CTRL-001 with nothing to
+# find -- so detection moved from pandas to SQL over the whole staged file.
+# ---------------------------------------------------------------------------
+def _rows(path: pathlib.Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _rewrite(path: pathlib.Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_a_duplicate_straddling_a_chunk_boundary_is_still_rejected(
+    conn: psycopg.Connection, extracts: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """The fault chunking could have introduced.
+
+    The first and last rows of the file are made identical, so with a chunk
+    size of two they cannot land in the same chunk. A per-chunk check sees each
+    once and rejects nothing.
+    """
+    from ingestion import loader as loader_module
+
+    source = extracts / "goods_movements.csv"
+    rows = _rows(source)
+    assert len(rows) > 4, "need enough rows to span several chunks"
+
+    # The duplicate: the first row repeated at the very end of the file.
+    staged = [*rows, dict(rows[0])]
+    target = tmp_path / "goods_movements.csv"
+    _rewrite(target, staged)
+
+    # A sidecar describing the file as written, so the load is not also
+    # failing a completeness check (ADR-022) and this test isolates the
+    # duplicate behaviour.
+    import json
+
+    sidecar = json.loads(
+        (extracts / "goods_movements.control_totals.json").read_text(encoding="utf-8")
+    )
+    sidecar["row_count"] = len(staged)
+    sidecar["value_total"] = str(sum(D(row[sidecar["value_column"]]) for row in staged))
+    (tmp_path / "goods_movements.control_totals.json").write_text(
+        json.dumps(sidecar), encoding="utf-8"
+    )
+
+    original_chunk = loader_module.CHUNK_ROWS
+    loader_module.CHUNK_ROWS = 2
+    try:
+        ingestion_main = __import__("ingestion.__main__", fromlist=["reset_raw"])
+        ingestion_main.reset_raw(conn, ["goods_movements"])
+        result = loader_module.load_extract(
+            conn, "goods_movements", target, loader_module.new_batch_id()
+        )
+    finally:
+        loader_module.CHUNK_ROWS = original_chunk
+
+    assert result.rows_in_file == len(staged), (
+        f"chunked read counted {result.rows_in_file} of {len(staged)} rows"
+    )
+    assert result.rows_rejected == 1, (
+        f"the duplicate was not rejected ({result.rows_rejected} rejected) -- a "
+        "per-chunk check would miss it because its two rows are in different chunks"
+    )
+    assert result.rows_inserted == len(rows), (
+        "the first occurrence must still load; only the surplus is quarantined"
+    )
+
+
+def test_the_chunk_size_does_not_change_what_is_loaded(
+    conn: psycopg.Connection, extracts: pathlib.Path
+) -> None:
+    """Reading in chunks must be invisible in the result.
+
+    Run twice at wildly different chunk sizes against a clean target, and every
+    counted figure must match. If they differed, the chunk size would be a
+    silent input to the data rather than a memory knob.
+    """
+    from ingestion import loader as loader_module
+
+    ingestion_main = __import__("ingestion.__main__", fromlist=["reset_raw"])
+    source = extracts / "goods_movements.csv"
+
+    outcomes = []
+    original = loader_module.CHUNK_ROWS
+    try:
+        for size in (3, 1_000_000):
+            loader_module.CHUNK_ROWS = size
+            ingestion_main.reset_raw(conn, ["goods_movements"])
+            result = loader_module.load_extract(
+                conn, "goods_movements", source, loader_module.new_batch_id()
+            )
+            outcomes.append(
+                (
+                    result.rows_in_file,
+                    result.rows_inserted,
+                    result.rows_rejected,
+                    result.value_total_in_file,
+                    result.file_sha256,
+                )
+            )
+    finally:
+        loader_module.CHUNK_ROWS = original
+
+    assert outcomes[0] == outcomes[1], (
+        f"chunk size changed the outcome: {outcomes[0]} at 3 rows against {outcomes[1]} in one pass"
+    )
+
+
+def test_the_value_total_is_summed_across_chunks(
+    conn: psycopg.Connection, extracts: pathlib.Path
+) -> None:
+    """The control total has to cover the whole file, not the last chunk.
+
+    It is compared against the sidecar's declared total, so a per-chunk value
+    would fail CTRL-001 for a reason that has nothing to do with the data.
+    """
+    import json
+
+    from ingestion import loader as loader_module
+
+    ingestion_main = __import__("ingestion.__main__", fromlist=["reset_raw"])
+    sidecar = json.loads(
+        (extracts / "goods_movements.control_totals.json").read_text(encoding="utf-8")
+    )
+
+    original = loader_module.CHUNK_ROWS
+    loader_module.CHUNK_ROWS = 7
+    try:
+        ingestion_main.reset_raw(conn, ["goods_movements"])
+        result = loader_module.load_extract(
+            conn, "goods_movements", extracts / "goods_movements.csv", loader_module.new_batch_id()
+        )
+    finally:
+        loader_module.CHUNK_ROWS = original
+
+    assert result.value_total_in_file == D(sidecar["value_total"]), (
+        f"summed {result.value_total_in_file} across chunks against a declared "
+        f"{sidecar['value_total']}"
+    )
+    assert result.rows_in_file == sidecar["row_count"]

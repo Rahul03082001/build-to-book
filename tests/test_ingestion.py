@@ -170,37 +170,6 @@ def test_rejection_detail_names_the_rule_that_failed(
 
 
 # ---------------------------------------------------------------------------
-# Source-side duplicates versus reruns (BTB-76, ADR-020)
-# ---------------------------------------------------------------------------
-def test_in_file_duplicate_is_rejected_not_skipped(
-    movements_frame: pd.DataFrame,
-) -> None:
-    """The distinction CTRL-001 depends on.
-
-    A row repeated inside one extract means the upstream interface posted
-    twice -- a finding. A row already in raw from an earlier run is a rerun.
-    A loader that only counted inserts could not tell them apart.
-    """
-    validated = schemas.schema_for("goods_movements").validate(movements_frame, lazy=True)
-    with_duplicate = pd.concat([validated, validated.iloc[[0]]], ignore_index=True)
-
-    surviving, rejected = loader._reject_in_file_duplicates("goods_movements", with_duplicate)
-
-    assert len(rejected) == 1
-    assert rejected[0].rule == loader.REJECT_DUPLICATE_NATURAL_KEY
-    assert "appears more than once" in rejected[0].detail
-    # The first occurrence survives: the legitimate posting still loads.
-    assert len(surviving) == len(validated)
-
-
-def test_clean_file_has_no_duplicates(movements_frame: pd.DataFrame) -> None:
-    validated = schemas.schema_for("goods_movements").validate(movements_frame, lazy=True)
-    surviving, rejected = loader._reject_in_file_duplicates("goods_movements", validated)
-    assert rejected == []
-    assert len(surviving) == len(validated)
-
-
-# ---------------------------------------------------------------------------
 # Batch identity and provenance (BTB-16)
 # ---------------------------------------------------------------------------
 def test_batch_ids_are_unique_and_time_sortable() -> None:
