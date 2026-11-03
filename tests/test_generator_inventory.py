@@ -60,7 +60,10 @@ def data(cfg: genconfig.GeneratorConfig) -> inventory.InventoryData:
     from generator import dataset
 
     built, _ = dataset.build(cfg, "demo")
-    extracts = built.as_mapping()
+    # materialise(), not as_mapping(): the movements and the ledger are
+    # deferred extracts now (ADR-028), because finished goods receipts cannot
+    # exist until MES has recorded the outcome.
+    extracts = built.materialise()
     return inventory.InventoryData(
         materials=extracts["materials"],
         suppliers=extracts["suppliers"],
@@ -212,14 +215,32 @@ def test_po_line_net_value_equals_quantity_times_price(data: inventory.Inventory
 
 
 def test_every_goods_receipt_references_a_real_po_line(data: inventory.InventoryData) -> None:
-    """Without this the three-way match has nothing to match."""
+    """Without this the three-way match has nothing to match.
+
+    PURCHASE receipts only. A receipt against a production order is confirmed
+    output (ADR-028) and has no purchase order line by design -- SAP uses 101
+    for both and tells them apart by the reference. Scoped on `po_number`
+    rather than on the movement type, so a production receipt cannot be
+    mistaken for an orphan.
+    """
     po_keys = {(line["po_number"], line["po_item"]) for line in data.purchase_order_lines}
     receipts = [
-        m for m in data.goods_movements if m["movement_type"] == inventory.MVT_GOODS_RECEIPT
+        m
+        for m in data.goods_movements
+        if m["movement_type"] == inventory.MVT_GOODS_RECEIPT and m["po_number"] is not None
     ]
-    assert receipts, "no receipts generated"
+    assert receipts, "no purchase receipts generated"
     orphans = [m for m in receipts if (m["po_number"], m["po_item"]) not in po_keys]
     assert not orphans, f"{len(orphans)} receipts reference a PO line that does not exist"
+
+    # And a receipt carries one reference or the other, never both or neither.
+    for movement in data.goods_movements:
+        if movement["movement_type"] != inventory.MVT_GOODS_RECEIPT:
+            continue
+        assert (movement["po_number"] is None) != (movement["order_number"] is None), (
+            f"receipt {movement['material_document']} carries both references or neither, "
+            "so nothing can attribute it"
+        )
 
 
 def test_goods_issues_carry_no_purchase_order_reference(data: inventory.InventoryData) -> None:
@@ -317,18 +338,48 @@ def test_subledger_ties_to_the_gl_per_period(data: inventory.InventoryData) -> N
     Compared to the cent, not within a tolerance. A tolerance here would hide
     the rounding faults the money guard in writers.py exists to prevent.
     """
-    subledger: dict[str, decimal.Decimal] = collections.defaultdict(lambda: D(0))
+    from generator import accounts, costing
+
+    def stock_account(movement: dict) -> str:
+        """Which inventory account a movement moves value through (ADR-028).
+
+        The same determination the generator applies to the postings and the
+        staging model derives in SQL. Three statements of one rule, each held
+        against the others -- here by this test, and in the warehouse by
+        `assert_movements_post_to_their_stock_account`.
+        """
+        if movement["movement_type"] == costing.MVT_DISPATCH:
+            return accounts.FINISHED_GOODS.number
+        if (
+            movement["movement_type"] == inventory.MVT_GOODS_RECEIPT
+            and movement["order_number"] is not None
+        ):
+            return accounts.FINISHED_GOODS.number
+        return accounts.INVENTORY_RAW.number
+
+    # Per account, not against raw materials alone. Stock sits in three
+    # accounts now, and tying everything to 130000 passes while covering only
+    # one of them.
+    subledger: dict[tuple[str, str], decimal.Decimal] = collections.defaultdict(lambda: D(0))
     for movement in data.goods_movements:
-        subledger[_period(movement["posting_date"])] += movement["amount_usd"]
+        subledger[stock_account(movement), _period(movement["posting_date"])] += movement[
+            "amount_usd"
+        ]
     for revaluation in data.inventory_revaluations:
-        subledger[_period(revaluation["posting_date"])] += revaluation["amount_usd"]
+        # Revaluations restate raw material already on hand.
+        subledger[accounts.INVENTORY_RAW.number, _period(revaluation["posting_date"])] += (
+            revaluation["amount_usd"]
+        )
 
-    ledger: dict[str, decimal.Decimal] = collections.defaultdict(lambda: D(0))
+    stock_accounts = {accounts.INVENTORY_RAW.number, accounts.FINISHED_GOODS.number}
+    ledger: dict[tuple[str, str], decimal.Decimal] = collections.defaultdict(lambda: D(0))
     for posting in data.gl_postings:
-        if posting["gl_account"] == inventory.ACCOUNT_INVENTORY:
-            ledger[_period(posting["posting_date"])] += posting["signed_amount_usd"]
+        if posting["gl_account"] in stock_accounts:
+            ledger[posting["gl_account"], _period(posting["posting_date"])] += posting[
+                "signed_amount_usd"
+            ]
 
-    assert set(subledger) == set(ledger), "periods differ between subledger and GL"
+    assert set(subledger) == set(ledger), "account/period pairs differ between subledger and GL"
     for period in sorted(subledger):
         assert subledger[period] == ledger[period], (
             f"{period}: subledger {subledger[period]} != GL {ledger[period]} "
@@ -352,23 +403,55 @@ def test_closing_inventory_is_materially_positive(data: inventory.InventoryData)
 def test_every_gl_posting_references_a_real_source_document(
     data: inventory.InventoryData,
 ) -> None:
-    """Every posting traces to a material document or a revaluation document."""
+    """Every posting traces to the thing that caused it.
+
+    Three kinds of cause since ADR-028, not one. Scrap and the work-in-process
+    residual are value-only entries that no material document causes: a
+    scrapped unit is destroyed rather than moved, and a residual is an
+    arithmetic fact about an order. Their references carry the order number, so
+    they remain traceable to a real production order rather than exempted.
+    """
     documents = {(m["material_document"], m["fiscal_year"]) for m in data.goods_movements}
     documents |= {
         (r["revaluation_document"], r["fiscal_year"]) for r in data.inventory_revaluations
     }
+    order_references = {
+        f"{prefix}-{movement['order_number']}"
+        for movement in data.goods_movements
+        if movement["order_number"] is not None
+        for prefix in ("SCRAP", "VARIANCE")
+    }
+
     orphans = [
-        p for p in data.gl_postings if (p["reference_document"], p["fiscal_year"]) not in documents
+        p
+        for p in data.gl_postings
+        if (p["reference_document"], p["fiscal_year"]) not in documents
+        and p["reference_document"] not in order_references
     ]
-    assert not orphans, f"{len(orphans)} GL postings reference no source document"
+    assert not orphans, (
+        f"{len(orphans)} GL postings reference no source document, "
+        f"e.g. {[p['reference_document'] for p in orphans[:3]]}"
+    )
 
 
 def test_inventory_lines_carry_a_material_and_offsets_do_not(
     data: inventory.InventoryData,
 ) -> None:
+    """A stock line names its material; the offset against it does not.
+
+    Both stock accounts, not just raw materials (ADR-028): a finished goods
+    line names the rack, and the work-in-process side of the same document
+    does not, because work in process is an aggregate of an order rather than
+    of a material.
+    """
+    from generator import accounts
+
+    stock_accounts = {accounts.INVENTORY_RAW.number, accounts.FINISHED_GOODS.number}
     for posting in data.gl_postings:
-        if posting["gl_account"] == inventory.ACCOUNT_INVENTORY:
-            assert posting["material_number"], "inventory line has no material"
+        if posting["gl_account"] in stock_accounts:
+            assert posting["material_number"], (
+                f"stock line on {posting['accounting_document']} has no material"
+            )
         else:
             assert posting["material_number"] is None, "offset line should carry no material"
 

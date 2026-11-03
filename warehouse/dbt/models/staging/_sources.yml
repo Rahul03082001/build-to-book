@@ -114,7 +114,7 @@ sources:
               - not_null
               - accepted_values:
                   arguments:
-                    values: ["101", "261", "561"]
+                    values: ["101", "261", "561", "601"]
           - name: quantity
             data_tests: [not_null]
           - name: amount_usd

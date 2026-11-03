@@ -376,30 +376,45 @@ def test_subledger_ties_to_the_gl_in_the_warehouse(
     passing through CSV, pandera coercion, COPY and numeric(18,2). A precision
     loss anywhere in that chain would make the control fail for a
     representation reason and look like a real difference.
+
+    Per inventory account, because ADR-028 put stock in three. Tying everything
+    to 130000 -- which this did -- passes while covering only raw materials,
+    since finished goods receipts and dispatches post elsewhere entirely.
     """
     with conn.cursor() as cursor:
         cursor.execute(
             """
             WITH movements AS (
-                SELECT to_char(posting_date, 'YYYY-MM') AS period, sum(amount_usd) AS amount
-                FROM raw.goods_movements GROUP BY 1
+                SELECT CASE
+                           WHEN movement_type = '601' THEN '137000'
+                           WHEN movement_type = '101' AND order_number IS NOT NULL
+                               THEN '137000'
+                           ELSE '130000'
+                       END AS account,
+                       to_char(posting_date, 'YYYY-MM') AS period,
+                       sum(amount_usd) AS amount
+                FROM raw.goods_movements GROUP BY 1, 2
             ),
             revaluations AS (
-                SELECT to_char(posting_date, 'YYYY-MM') AS period, sum(amount_usd) AS amount
-                FROM raw.inventory_revaluations GROUP BY 1
+                SELECT '130000' AS account,
+                       to_char(posting_date, 'YYYY-MM') AS period,
+                       sum(amount_usd) AS amount
+                FROM raw.inventory_revaluations GROUP BY 2
             ),
             subledger AS (
-                SELECT period, sum(amount) AS amount FROM (
+                SELECT account, period, sum(amount) AS amount FROM (
                     SELECT * FROM movements UNION ALL SELECT * FROM revaluations
-                ) combined GROUP BY 1
+                ) combined GROUP BY 1, 2
             ),
             ledger AS (
-                SELECT to_char(posting_date, 'YYYY-MM') AS period,
+                SELECT gl_account AS account,
+                       to_char(posting_date, 'YYYY-MM') AS period,
                        sum(signed_amount_usd) AS amount
-                FROM raw.gl_postings WHERE gl_account = '130000' GROUP BY 1
+                FROM raw.gl_postings
+                WHERE gl_account IN ('130000', '137000') GROUP BY 1, 2
             )
-            SELECT s.period, s.amount, l.amount, s.amount - l.amount
-            FROM subledger s FULL OUTER JOIN ledger l USING (period)
+            SELECT s.account || ' ' || s.period, s.amount, l.amount, s.amount - l.amount
+            FROM subledger s FULL OUTER JOIN ledger l USING (account, period)
             ORDER BY 1
             """
         )
@@ -442,14 +457,36 @@ def test_no_material_shows_negative_on_hand_in_the_warehouse(
 def test_every_goods_receipt_matches_a_po_line_in_the_warehouse(
     conn: psycopg.Connection, second_run: dict[str, Any]
 ) -> None:
+    """A PURCHASE receipt must name a real purchase order line.
+
+    Scoped to receipts that carry a purchase order. A receipt against a
+    PRODUCTION order is confirmed output (ADR-028) and has no purchase order
+    line by design -- SAP uses movement type 101 for both and tells them apart
+    by the reference, which is what the filter below does. Without that scope
+    this counted every finished goods receipt as an orphan.
+    """
     with conn.cursor() as cursor:
         cursor.execute(
             "SELECT count(*) FROM raw.goods_movements m "
             "LEFT JOIN raw.purchase_order_lines l "
             "  ON l.po_number = m.po_number AND l.po_item = m.po_item "
-            "WHERE m.movement_type = '101' AND l.po_number IS NULL"
+            "WHERE m.movement_type = '101' AND m.po_number IS NOT NULL "
+            "  AND l.po_number IS NULL"
         )
         assert cursor.fetchone()[0] == 0, "orphaned goods receipts in the warehouse"
+
+    # And the separation itself: a receipt carries one reference or the other,
+    # never both and never neither.
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM raw.goods_movements "
+            "WHERE movement_type = '101' "
+            "  AND (po_number IS NULL) = (order_number IS NULL)"
+        )
+        assert cursor.fetchone()[0] == 0, (
+            "a receipt carries both a purchase order and a production order, or "
+            "neither -- so nothing can attribute it"
+        )
 
 
 def test_loader_connects_as_a_role_that_cannot_read_reporting() -> None:

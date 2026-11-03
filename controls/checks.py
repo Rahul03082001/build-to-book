@@ -89,7 +89,7 @@ class Check:
 # ---------------------------------------------------------------------------
 SUBLEDGER_TO_GL = Check(
     check_id="CTRL-003",
-    name="Inventory subledger ties to GL account 130000",
+    name="Inventory subledger ties to the GL, per inventory account",
     shape=CheckShape.COMPARISON,
     severity=SEVERITY_CRITICAL,
     rationale=(
@@ -98,40 +98,62 @@ SUBLEDGER_TO_GL = Check(
     ),
     sql="""
         with movements as (
-            select posting_period, sum(amount_usd) as amount_usd
+            select
+                stock_account,
+                posting_period,
+                sum(amount_usd) as amount_usd
             from {marts}.fct_goods_movements
-            group by posting_period
+            group by stock_account, posting_period
         ),
 
         revaluations as (
-            select posting_period, sum(amount_usd) as amount_usd
+            -- Revaluations restate raw material already on hand, so they
+            -- belong to that account and nowhere else.
+            select
+                '130000'        as stock_account,
+                posting_period,
+                sum(amount_usd) as amount_usd
             from {marts}.fct_inventory_revaluations
             group by posting_period
         ),
 
         subledger as (
-            select posting_period, sum(amount_usd) as amount_usd
+            select
+                stock_account,
+                posting_period,
+                sum(amount_usd) as amount_usd
             from (
-                select posting_period, amount_usd from movements
+                select stock_account, posting_period, amount_usd from movements
                 union all
-                select posting_period, amount_usd from revaluations
+                select stock_account, posting_period, amount_usd from revaluations
             ) as combined
-            group by posting_period
+            group by stock_account, posting_period
         ),
 
         ledger as (
-            select posting_period, sum(signed_amount_usd) as amount_usd
+            select
+                gl_account      as stock_account,
+                posting_period,
+                sum(signed_amount_usd) as amount_usd
             from {marts}.fct_gl_postings
-            where gl_account = '130000'
-            group by posting_period
+            -- Only the accounts that hold stock. Work in process holds value
+            -- but no quantity: components issued to an order have no material
+            -- document of their own on the work-in-process side, so it has no
+            -- subledger of movements to tie to.
+            where gl_account in ('130000', '137000')
+            group by gl_account, posting_period
         )
 
         select
-            coalesce(l.posting_period, s.posting_period) as period,
-            coalesce(l.amount_usd, 0)                    as expected_value,
-            coalesce(s.amount_usd, 0)                    as actual_value
+            coalesce(l.stock_account, s.stock_account)
+                || ' ' || coalesce(l.posting_period, s.posting_period) as period,
+            coalesce(l.amount_usd, 0)                                  as expected_value,
+            coalesce(s.amount_usd, 0)                                  as actual_value
         from ledger as l
-        full outer join subledger as s on s.posting_period = l.posting_period
+        full outer join subledger as s
+            on
+                s.stock_account = l.stock_account
+                and s.posting_period = l.posting_period
         order by 1
     """,
 )

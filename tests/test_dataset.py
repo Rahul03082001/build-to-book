@@ -253,7 +253,7 @@ def test_streaming_and_in_memory_writers_agree(
     """
     data, _ = built
     spec = dataset.EXTRACT_SPECS["goods_movements"]
-    rows = data.as_mapping()["goods_movements"]
+    rows = data.materialise()["goods_movements"]
 
     one = writers.write_extract(spec, rows, tmp_path / "memory", STAMP)
     chunks = (rows[i : i + 500] for i in range(0, len(rows), 500))
@@ -454,8 +454,11 @@ def test_a_stamped_column_is_populated_by_the_end_of_a_full_build(
     cleanly with a null column and the only symptom would be an empty join.
     """
     data, _ = dataset.build(cfg, "demo")
+    # materialise(), because `goods_movements` is a deferred extract now
+    # (ADR-028) and is absent from as_mapping() by design.
+    extracts = data.materialise()
     for name, columns in dataset.STAMPED_COLUMNS.items():
-        rows = data.as_mapping()[name]
+        rows = extracts[name]
         for column in columns:
             populated = sum(1 for row in rows if row[column] is not None)
             assert populated > 0, (

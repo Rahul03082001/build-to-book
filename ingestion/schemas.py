@@ -42,9 +42,11 @@ _SHA256 = r"^[0-9a-f]{64}$"
 
 # Movement types this slice knows about (ADR-002). An unknown type would get a
 # sign of zero in the mart and silently drop out of the balance.
-#: 101 goods receipt, 261 issue to a production order, 561 initial stock
-#: entry (opening stock, ADR-027).
-_MOVEMENT_TYPES = ["101", "261", "561"]
+#: 101 goods receipt -- from a purchase order, or from a production order
+#: when it carries one; 261 issue to a production order; 561 initial stock
+#: entry (opening stock, ADR-027); 601 goods issue for delivery, which
+#: relieves finished goods and recognises cost of sale (ADR-028).
+_MOVEMENT_TYPES = ["101", "261", "561", "601"]
 
 #: Inbound delivery statuses. RECEIVED means a goods receipt exists against
 #: it; IN_TRANSIT means the shipment is still on the water at period end,

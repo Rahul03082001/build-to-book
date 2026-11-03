@@ -55,14 +55,22 @@ EXTRACT_SPECS: dict[str, ExtractSpec] = {
     # concerns.
     "shipment_headers": shipments.EXTRACT_SPECS["shipment_headers"],
     "shipment_lines": shipments.EXTRACT_SPECS["shipment_lines"],
-    "goods_movements": inventory.EXTRACT_SPECS["goods_movements"],
     "supplier_invoice_headers": invoices.EXTRACT_SPECS["supplier_invoice_headers"],
     "supplier_invoice_lines": invoices.EXTRACT_SPECS["supplier_invoice_lines"],
     "production_orders": production.EXTRACT_SPECS["production_orders"],
     "component_consumption": production.EXTRACT_SPECS["component_consumption"],
     "mes_unit_events": mes.EXTRACT_SPECS["mes_unit_events"],
     "production_confirmations": production.EXTRACT_SPECS["production_confirmations"],
+    # After the confirmations, because finished goods receipts come from them
+    # (ADR-028) and a confirmation is only known once MES has recorded the
+    # outcome. Load order and generation order diverge again: the movements
+    # reference shipments, which are derived from the movements -- so shipments
+    # load first and are generated from the raw-material part of the ledger,
+    # which exists long before production confirms anything.
+    "goods_movements": inventory.EXTRACT_SPECS["goods_movements"],
     "inventory_revaluations": inventory.EXTRACT_SPECS["inventory_revaluations"],
+    # Last: every posting comes from a movement, a revaluation or an order's
+    # costing, so the ledger cannot be written until all three exist.
     "gl_postings": inventory.EXTRACT_SPECS["gl_postings"],
 }
 
@@ -82,7 +90,17 @@ STREAMED: frozenset[str] = frozenset({"mes_unit_events"})
 #: writer iterating that order has the outcome by the time it needs it. A test
 #: asserts the ordering, because reversing it would silently produce empty
 #: confirmations.
-DEFERRED: frozenset[str] = frozenset({"production_confirmations"})
+DEFERRED: frozenset[str] = frozenset(
+    {
+        "production_confirmations",
+        # Finished goods receipts and dispatches are material documents that
+        # only exist once production has confirmed output, which needs the MES
+        # outcome (ADR-028).
+        "goods_movements",
+        # And every posting needs the movements, so the ledger is last.
+        "gl_postings",
+    }
+)
 
 #: Columns a generator emits as None and a LATER generator fills in.
 #:
@@ -129,8 +147,39 @@ class Dataset:
     deferred: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def as_mapping(self) -> dict[str, list[dict[str, Any]]]:
-        """The in-memory extracts only. Streamed ones are in `streams`."""
+        """The in-memory extracts only. Streamed and deferred ones are not here.
+
+        Deliberately partial. `goods_movements` and `gl_postings` became
+        deferred with ADR-028 -- finished goods receipts cannot exist until MES
+        has recorded the outcome -- so reading them from here raises KeyError
+        rather than returning a stale copy. `materialise` is the way to get
+        everything.
+        """
         return self.extracts
+
+    def materialise(self) -> dict[str, list[dict[str, Any]]]:
+        """Every extract, with streams drained and deferred callables run.
+
+        One obvious way to get the whole dataset, so no caller has to know
+        which extracts are deferred or in what order they depend on each other.
+        Iterated in LOAD_ORDER, which is what makes the dependencies resolve:
+        the confirmations come from the MES outcome, the movements from the
+        confirmations, and the ledger from the movements.
+
+        Holds everything in memory, which is exactly what streaming exists to
+        avoid (ADR-024) -- 5,000,000 MES events measured about 4.3 GB as dicts.
+        So this is for tests and the demo profile. Anything that has to handle
+        the full profile uses `write_all`, which streams.
+        """
+        materialised: dict[str, list[dict[str, Any]]] = {}
+        for name in LOAD_ORDER:
+            if name in STREAMED:
+                materialised[name] = [row for chunk in self.streams[name]() for row in chunk]
+            elif name in DEFERRED:
+                materialised[name] = list(self.deferred[name]())
+            else:
+                materialised[name] = self.extracts[name]
+        return materialised
 
     def row_count(self) -> int:
         return sum(len(rows) for rows in self.extracts.values())
@@ -377,12 +426,102 @@ def build(
     }
     streams: dict[str, Any] = {"mes_unit_events": mes_generator.stream}
 
-    deferred: dict[str, Any] = {
-        "production_confirmations": lambda: production_generator.confirm(
-            production_data.orders,
-            mes_generator.outcome.completed_by_order,
-            mes_generator.outcome.scrapped_by_order,
+    # The standard-costing chain (ADR-028). All three are memoised, because the
+    # writer calls each deferred extract once but they depend on one another:
+    # the movements need the confirmations, and the postings need both. Calling
+    # `confirm` twice would also allocate two sets of confirmation numbers for
+    # the same output.
+    chain: dict[str, Any] = {}
+    # Appended to by build_ledger at write time, and returned to the caller as
+    # the same object -- so the manifest must be populated AFTER the extracts
+    # are written, not before.
+    planted: list[defects.InjectedRecord] = []
+
+    def confirmations() -> list[dict[str, Any]]:
+        if "confirmations" not in chain:
+            chain["confirmations"] = production_generator.confirm(
+                production_data.orders,
+                mes_generator.outcome.completed_by_order,
+                mes_generator.outcome.scrapped_by_order,
+            )
+        return chain["confirmations"]
+
+    def build_ledger() -> None:
+        """Build the final movements and postings, then plant any defects.
+
+        Both in one step, and defects planted here, because `goods_movements`
+        is written before `gl_postings` and a defect has to be in BOTH lists
+        before either reaches a file. Planting into the inventory slice's own
+        lists instead silently lost `backdated_gl_posting` entirely: the
+        postings are regenerated here from movements that did not exist when
+        the slice was made, so the injected document was discarded and the
+        manifest claimed a defect the extract did not contain.
+        """
+        if "movements" in chain:
+            return
+
+        receipts, dispatches = costing.production_movements(
+            confirmations=confirmations(),
+            order_plan=production_data.order_plan,
+            unit_cost=rolled,
+            next_document=generator.next_material_document,
+            clerk_for=generator.clerk,
+            dispatch_rate=float(config.domain["finished_goods_dispatch_rate"]),
+            period_end=generator.end,
+            rng=generator.rng,
+            plant=inventory.PLANT,
+            uom=config.domain["uom_default"],
         )
+        movements = [*inventory_data.goods_movements, *receipts, *dispatches]
+
+        # What each order absorbed, from the issues actually posted rather than
+        # from the bill of materials -- taking both sides of a variance from the
+        # standard would guarantee zero.
+        issue_value_by_order: dict[str, Any] = {}
+        for movement in inventory_data.goods_movements:
+            order_number = movement.get("order_number")
+            if movement["movement_type"] != inventory.MVT_GOODS_ISSUE or not order_number:
+                continue
+            issue_value_by_order[order_number] = issue_value_by_order.get(order_number, 0) + abs(
+                movement["amount_usd"]
+            )
+
+        postings = generator.gl_postings(
+            movements,
+            inventory_data.inventory_revaluations,
+            costing.order_costings(
+                confirmations=confirmations(),
+                order_plan=production_data.order_plan,
+                unit_cost=rolled,
+                issue_value_by_order=issue_value_by_order,
+            ),
+        )
+
+        if enabled_defects:
+            planted.extend(
+                generator.inject_defects(
+                    enabled=list(enabled_defects),
+                    movements=movements,
+                    postings=postings,
+                )
+            )
+
+        chain["movements"] = movements
+        chain["postings"] = postings
+
+    def all_movements() -> list[dict[str, Any]]:
+        """Raw-material movements plus the finished goods the factory produced."""
+        build_ledger()
+        return chain["movements"]
+
+    def postings() -> list[dict[str, Any]]:
+        build_ledger()
+        return chain["postings"]
+
+    deferred: dict[str, Any] = {
+        "production_confirmations": confirmations,
+        "goods_movements": all_movements,
+        "gl_postings": postings,
     }
 
     extracts: dict[str, list[dict[str, Any]]] = {}
@@ -409,7 +548,8 @@ def build(
         deferred=deferred,
     )
 
-    planted = (
-        generator.inject_defects(inventory_data, list(enabled_defects)) if enabled_defects else []
-    )
+    # `planted` is filled when the ledger is built, which happens while the
+    # extracts are being written (see build_ledger). It is returned as the same
+    # list object, so a caller that reads it before writing sees nothing --
+    # which is why the CLI and the test helper populate the manifest afterwards.
     return dataset, planted

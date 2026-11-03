@@ -117,7 +117,7 @@ def test_every_posted_account_is_declared(built: dataset.Dataset) -> None:
     simply drops out of both the balance sheet and the income statement. That
     is why this is asserted here rather than left to the document check.
     """
-    posted = {row["gl_account"] for row in built.as_mapping()["gl_postings"]}
+    posted = {row["gl_account"] for row in built.materialise()["gl_postings"]}
     assert posted
     undeclared = sorted(posted - set(accounts.BY_NUMBER))
     assert not undeclared, f"posted to undeclared account(s): {undeclared}"
@@ -131,7 +131,7 @@ def test_the_chart_declares_no_account_nobody_posts_to(built: dataset.Dataset) -
     chain is about to start using -- and names them, so the exemption cannot
     quietly become permanent.
     """
-    posted = {row["gl_account"] for row in built.as_mapping()["gl_postings"]}
+    posted = {row["gl_account"] for row in built.materialise()["gl_postings"]}
 
     # The standard-costing chain lands in the next commit (ADR-028). Until it
     # does, these three are declared and unposted on purpose.

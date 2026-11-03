@@ -23,6 +23,9 @@ select
 
     movement_type,
     movement_direction,
+    -- Which inventory account this moves value through (ADR-028). CTRL-003
+    -- reconciles per account, so the mart has to carry it.
+    stock_account,
 
     -- Foreign keys.
     material_number,

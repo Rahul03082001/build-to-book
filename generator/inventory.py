@@ -72,7 +72,16 @@ MVT_GOODS_ISSUE = "261"  # GI to production order
 #: It is also what the opening balance on a trial balance means.
 MVT_INITIAL_STOCK = "561"
 
-MOVEMENT_SIGN = {MVT_GOODS_RECEIPT: 1, MVT_GOODS_ISSUE: -1, MVT_INITIAL_STOCK: 1}
+#: Goods issue for delivery (ADR-028). Finished goods leave and cost of sale is
+#: recognised -- the only place COGS is posted in this project.
+MVT_DISPATCH = "601"
+
+MOVEMENT_SIGN = {
+    MVT_GOODS_RECEIPT: 1,
+    MVT_GOODS_ISSUE: -1,
+    MVT_INITIAL_STOCK: 1,
+    MVT_DISPATCH: -1,
+}
 
 # ---------------------------------------------------------------------------
 # Chart of accounts (the inventory corner of it).
@@ -448,6 +457,26 @@ class InventoryGenerator:
         if span <= 0:
             return first
         return first + dt.timedelta(days=int(self.rng.integers(0, span + 1)))
+
+    def clerk(self) -> str:
+        """A warehouse clerk, from the same pool the movements already use.
+
+        Public so the production-costing module can stamp its movements with a
+        clerk from the same set rather than inventing a second pool -- two
+        pools would make `entered_by` meaningless as a segregation-of-duties
+        signal (CTRL-012).
+        """
+        return str(self._choice(_CLERKS))
+
+    def next_material_document(self, fiscal_year: int) -> str:
+        """The next material document number for a fiscal year.
+
+        Public for the same reason as `clerk`: finished goods receipts and
+        dispatches are material documents and must come from the same number
+        range, or the natural key could collide across two ranges that each
+        think they own it.
+        """
+        return self._md_range(fiscal_year).next()
 
     def _md_range(self, year: int) -> ids.NumberRange:
         if year not in self._md_numbers:
@@ -1150,13 +1179,30 @@ class InventoryGenerator:
         self,
         movements: Sequence[dict[str, Any]],
         revaluations: Sequence[dict[str, Any]] = (),
+        order_costings: Sequence[Any] = (),
     ) -> list[dict[str, Any]]:
-        """One accounting document per material document, two lines per item.
+        """One accounting document per material document, two lines per item,
+        plus the value-only entries that no material document causes.
 
-        A goods receipt debits inventory and credits the GR/IR clearing
-        account. A goods issue credits inventory and debits consumption. Every
-        document balances to zero in signed terms, and the inventory lines sum
-        to the same figure as the movements that produced them.
+        Account determination depends on the movement type and on what the
+        movement references -- see the branch below and ADR-028. Every document
+        balances to zero in signed terms, and the stock lines sum to the same
+        figure as the movements that produced them.
+
+        Three kinds of entry have no material document behind them, because
+        nothing moved physically:
+
+        * a standard cost revaluation (ADR-023), which restates stock already
+          on hand;
+        * scrap, which writes destroyed units out of work in process;
+        * the work-in-process residual when an order closes, which becomes a
+          production variance.
+
+        Args:
+            movements: Material document lines.
+            revaluations: Standard cost revaluations.
+            order_costings: `costing.OrderCosting` per closed production order,
+                for the scrap and variance entries.
         """
         by_document: dict[tuple[str, int], list[dict[str, Any]]] = {}
         for movement in movements:
@@ -1171,19 +1217,61 @@ class InventoryGenerator:
             line_item = 0
             for movement in sorted(items, key=lambda m: m["material_document_item"]):
                 amount = abs(movement["amount_usd"])
+                # Account determination (ADR-028). Which accounts a movement
+                # posts to depends on the movement type AND on what it
+                # references -- a receipt against a purchase order is a
+                # supplier liability, while a receipt against a production
+                # order is work in process becoming finished goods. SAP uses
+                # 101 for both and distinguishes them exactly this way.
                 movement_type = movement["movement_type"]
-                is_inbound = movement_type in (MVT_GOODS_RECEIPT, MVT_INITIAL_STOCK)
+                from_production = movement.get("order_number") is not None
+
                 if movement_type == MVT_INITIAL_STOCK:
-                    offset_account = ACCOUNT_OPENING_BALANCE
+                    # Opening stock: no prior period to come from, so the
+                    # counter-entry is retained earnings (ADR-027).
+                    stock_account, offset_account, inbound = (
+                        ACCOUNT_INVENTORY,
+                        ACCOUNT_OPENING_BALANCE,
+                        True,
+                    )
+                elif movement_type == MVT_DISPATCH:
+                    # Finished goods leave and cost of sale is recognised. The
+                    # only place COGS is posted in this project (ADR-028).
+                    stock_account, offset_account, inbound = (
+                        accounts.FINISHED_GOODS.number,
+                        accounts.COST_OF_GOODS_SOLD.number,
+                        False,
+                    )
+                elif movement_type == MVT_GOODS_RECEIPT and from_production:
+                    # Confirmed output: work in process becomes product.
+                    stock_account, offset_account, inbound = (
+                        accounts.FINISHED_GOODS.number,
+                        accounts.WORK_IN_PROCESS.number,
+                        True,
+                    )
                 elif movement_type == MVT_GOODS_RECEIPT:
-                    offset_account = ACCOUNT_GR_IR_CLEARING
+                    stock_account, offset_account, inbound = (
+                        ACCOUNT_INVENTORY,
+                        ACCOUNT_GR_IR_CLEARING,
+                        True,
+                    )
                 else:
-                    offset_account = ACCOUNT_CONSUMPTION
+                    # A component issued to an order CAPITALISES into work in
+                    # process; it is not consumed. Posting it to an expense
+                    # account -- which is what this did before ADR-028 -- states
+                    # that the money has left the business when it has only
+                    # moved along the floor.
+                    stock_account, offset_account, inbound = (
+                        ACCOUNT_INVENTORY,
+                        accounts.WORK_IN_PROCESS.number,
+                        False,
+                    )
+                is_inbound = inbound
 
                 # Inventory line, then its offset.
                 pairs = [
                     (
-                        ACCOUNT_INVENTORY,
+                        stock_account,
                         DEBIT if is_inbound else CREDIT,
                         movement["material_number"],
                     ),
@@ -1255,11 +1343,74 @@ class InventoryGenerator:
                         "entered_by": "MLEDGER",
                     }
                 )
+
+        # --- scrap and the work-in-process residual (ADR-028) ---
+        #
+        # Value-only: a scrapped unit is destroyed rather than moved, and a
+        # residual is an arithmetic fact about an order rather than an event.
+        # Both relieve work in process, which is what makes the account empty
+        # as orders close instead of growing without limit.
+        for order_costing in order_costings:
+            posting_date = order_costing.posting_date
+            fiscal_year = posting_date.year
+
+            for amount, expense_account, reference in (
+                (order_costing.scrapped, accounts.SCRAP_EXPENSE.number, "SCRAP"),
+                (order_costing.variance, accounts.PRODUCTION_VARIANCE.number, "VARIANCE"),
+            ):
+                if amount == 0:
+                    # No entry rather than a zero-value document. A document
+                    # that posts nothing is noise in the ledger and would make
+                    # the document count meaningless as a measure of activity.
+                    continue
+
+                accounting_document = self._ad_range(fiscal_year).next()
+                magnitude = abs(amount)
+                # A positive residual means the order absorbed more than it
+                # relieved, so the expense is debited and work in process is
+                # credited down. A negative one reverses both.
+                debit_expense = amount > 0
+                pairs = [
+                    (expense_account, DEBIT if debit_expense else CREDIT, None),
+                    (
+                        accounts.WORK_IN_PROCESS.number,
+                        CREDIT if debit_expense else DEBIT,
+                        None,
+                    ),
+                ]
+                for line_item, (account, indicator, material_number) in enumerate(pairs, start=1):
+                    rows.append(
+                        {
+                            "accounting_document": accounting_document,
+                            "line_item": line_item,
+                            "fiscal_year": fiscal_year,
+                            "company_code": COMPANY_CODE,
+                            "gl_account": account,
+                            "debit_credit_indicator": indicator,
+                            "amount_usd": magnitude,
+                            "signed_amount_usd": (
+                                magnitude if indicator == DEBIT else money(-magnitude)
+                            ),
+                            "currency": CURRENCY,
+                            "posting_date": posting_date,
+                            "document_date": posting_date,
+                            "entered_on": posting_date,
+                            # The order, so a reviewer can trace the entry to
+                            # the production it came from.
+                            "reference_document": f"{reference}-{order_costing.order_number}",
+                            "material_number": material_number,
+                            "entered_by": "COSTING",
+                        }
+                    )
         return rows
 
     # -- defect injection -------------------------------------------------
     def inject_defects(
-        self, data: InventoryData, enabled: Sequence[str]
+        self,
+        data: InventoryData | None = None,
+        enabled: Sequence[str] = (),
+        movements: list[dict[str, Any]] | None = None,
+        postings: list[dict[str, Any]] | None = None,
     ) -> list[defects.InjectedRecord]:
         """Plant the requested defects and return what was planted.
 
@@ -1271,7 +1422,30 @@ class InventoryGenerator:
         An unimplemented defect raises rather than being skipped: silently
         ignoring a requested defect would make a detection test pass with
         nothing planted.
+
+        Args:
+            data: An `InventoryData` whose movements and postings are the final
+                ones. Convenient when the slice is generated in one pass.
+            enabled: Defect keys to plant.
+            movements: Final movement rows, when they are not the slice's own.
+            postings: Final posting rows, likewise.
+
+        `movements` and `postings` exist because the ledger became a deferred
+        extract (ADR-028): finished goods receipts cannot be generated until
+        MES has recorded the outcome, so the postings are built at write time
+        from movements that did not exist when the inventory slice was made.
+        Planting into the slice's own lists then plants into data nobody
+        writes -- which is exactly what happened to `backdated_gl_posting`
+        until this signature changed, and the defect silently vanished.
         """
+        if movements is None:
+            if data is None:
+                raise ValueError("pass either data or both movements and postings")
+            movements = data.goods_movements
+        if postings is None:
+            if data is None:
+                raise ValueError("pass either data or both movements and postings")
+            postings = data.gl_postings
         planted: list[defects.InjectedRecord] = []
         for key in defects.REGISTRY:
             if key not in enabled:
@@ -1281,11 +1455,11 @@ class InventoryGenerator:
             count = int(spec.get("count", 1))
 
             if key == "duplicate_goods_receipt":
-                planted.extend(injector(data.goods_movements, data.gl_postings, count, self.rng))
+                planted.extend(injector(movements, postings, count, self.rng))
             elif key == "backdated_gl_posting":
                 planted.extend(
                     injector(
-                        data.gl_postings,
+                        postings,
                         count,
                         self.period_close_date,
                         lambda year: self._ad_range(year).next(),

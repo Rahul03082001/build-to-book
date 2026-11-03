@@ -95,12 +95,18 @@ def main(argv: list[str] | None = None) -> int:
     manifest = defects.DefectManifest(
         seed=cfg.seed, profile=args.profile, generated_at=generated_at
     )
-    for record in planted:
-        manifest.add(record)
 
     print(f"{'extract':28}{'rows':>8}  {'value total':>20}  sha256")
     print("-" * 86)
     written = dataset_module.write_all(data, out_dir, generated_at)
+
+    # After writing, not before. Defects are planted when the ledger is built,
+    # and the ledger is a deferred extract (ADR-028) -- so `planted` is empty
+    # until write_all has run. Populating the manifest first produced a
+    # manifest claiming nothing was planted while the extracts contained the
+    # defects.
+    for record in planted:
+        manifest.add(record)
     for result in written:
         total = f"{result.value_total:,}" if result.value_total is not None else "-"
         print(f"{result.spec.name:28}{result.row_count:>8}  {total:>20}  {result.sha256[:12]}")

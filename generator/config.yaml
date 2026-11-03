@@ -131,6 +131,13 @@ domain:
   # distribution has to say so.
   supplier_late_delivery_rate: 0.12
 
+  # Share of confirmed output dispatched within the period (ADR-028). The rest
+  # stays in finished goods, because a manufacturer ships from stock rather
+  # than emptying it -- dispatching everything would leave finished goods at
+  # zero every period, the same fault `inventory_retention` exists to prevent
+  # for raw materials.
+  finished_goods_dispatch_rate: 0.85
+
 # ---------------------------------------------------------------------------
 # Period close. Postings dated into a closed period are a control violation,
 # not a data quirk -- see the backdated_gl_posting defect.

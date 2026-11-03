@@ -86,7 +86,7 @@ def test_invoices_bill_the_quantity_received_not_ordered(
     short delivery, so the control could never detect one.
     """
     received: dict[tuple[str, int], int] = collections.defaultdict(int)
-    for movement in built.as_mapping()["goods_movements"]:
+    for movement in built.materialise()["goods_movements"]:
         if movement["movement_type"] == "101":
             received[(movement["po_number"], movement["po_item"])] += movement["quantity"]
 
@@ -136,7 +136,7 @@ def test_some_receipts_are_not_invoiced(built: dataset.Dataset) -> None:
     }
     receipted = {
         (movement["po_number"], movement["po_item"])
-        for movement in built.as_mapping()["goods_movements"]
+        for movement in built.materialise()["goods_movements"]
         if movement["movement_type"] == "101"
     }
     assert receipted - invoiced, "every receipt was invoiced, so GR/IR is always zero"
