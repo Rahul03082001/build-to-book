@@ -185,10 +185,27 @@ def build(
     profile = config.profile(profile_name)
     generator = inventory.InventoryGenerator(config, profile_name)
 
-    inventory_data = generator.generate()
+    # Order matters, and it changed with ADR-027. Inventory used to be
+    # generated first and completely; now its purchase quantities have to cover
+    # what production will consume, and its goods issues ARE that consumption.
+    # So: masters, then the bill of materials, then production, then back to
+    # inventory for procurement and movements.
+    #
+    # The two slices are no longer independent. That is the point -- they
+    # describe one physical flow rather than two unrelated ones.
+    # Every master is drawn here, before anything downstream exists. The
+    # generators below take their own draws from the same seeded source, so
+    # drawing a master after them would make it depend on how much randomness
+    # they happened to use -- which is exactly what happened when procurement
+    # moved to the end of the run: the same cost window came out at 21,358.00
+    # inside a full build and 32,396.00 on its own. They are memoised, so
+    # `generate()` reuses these rather than redrawing.
+    materials = generator.materials()
+    generator.suppliers()
+    generator.standard_costs(materials)
 
     bom_generator = bom.BomGenerator(
-        materials=inventory_data.materials,
+        materials=materials,
         rng=generator.rng,
         plant=inventory.PLANT,
         uom=config.domain["uom_default"],
@@ -196,17 +213,6 @@ def build(
         rack_configuration_count=profile.rack_configurations,
     )
     bom_data = bom_generator.generate()
-
-    invoice_generator = invoices.InvoiceGenerator(
-        purchase_order_headers=inventory_data.purchase_order_headers,
-        purchase_order_lines=inventory_data.purchase_order_lines,
-        suppliers=inventory_data.suppliers,
-        goods_movements=inventory_data.goods_movements,
-        rng=generator.rng,
-        uom=config.domain["uom_default"],
-        period_end=generator.end,
-    )
-    invoice_data = invoice_generator.generate()
 
     production_generator = production.ProductionGenerator(
         bom_headers=bom_data.headers,
@@ -221,24 +227,6 @@ def build(
     )
     production_data = production_generator.generate()
 
-    # Shipments come from the receipts that already exist, and stamp
-    # `inbound_delivery` onto those movement rows in place (ADR-026). Derived
-    # rather than generated independently so shipped quantity ties to received
-    # quantity exactly, and so there is no second row count to disagree with
-    # the first -- the fault `mes.order_quantity_for_profile` exists to prevent.
-    shipment_outcome = shipments.build(
-        config=config,
-        movements=inventory_data.goods_movements,
-        po_headers=inventory_data.purchase_order_headers,
-        po_lines=inventory_data.purchase_order_lines,
-        period_start=generator.start,
-        period_end=generator.end,
-    )
-
-    # One mapping per source system, merged in LOAD_ORDER. Building the dict
-    # by iterating LOAD_ORDER rather than by merging means an extract declared
-    # in the order but produced by nobody raises here instead of silently
-    # missing from the output.
     # MES events are generated per unit, so the order quantities have to imply
     # the profile's declared event count. They used to be randint(1, 9), which
     # produced ~158,000 events against a declared 5,000,000 on the full
@@ -261,6 +249,57 @@ def build(
     # rescaled with it or the Phase 3 variance metrics measure the generator.
     production_generator.rescale_consumption(production_data.consumption, units_per_order)
 
+    # Demand: what production will consume of each component, after the
+    # rescale above. Purchase quantities are sized from this (ADR-027), so
+    # receipts cover consumption instead of being drawn from a range that had
+    # no relationship to it.
+    #
+    # Computed here rather than inside the inventory generator because it is a
+    # fact about production, and putting it there would mean the inventory
+    # slice deciding how much the factory needs.
+    demand: dict[str, int] = {}
+    for line in production_data.consumption:
+        component = line["component_material_number"]
+        demand[component] = demand.get(component, 0) + int(line["quantity_consumed"])
+
+    # Procurement and the material ledger, now that demand is known. The goods
+    # issues in here ARE production_data.consumption.
+    inventory_data = generator.generate(demand=demand, consumption=production_data.consumption)
+
+    # Refuses a negative balance rather than clamping the issues. Demand is
+    # fixed by the bill of materials, so stock running out is a configuration
+    # fault that must stop the run, not something to quietly absorb.
+    inventory.assert_on_hand_never_negative(inventory_data.goods_movements)
+
+    invoice_generator = invoices.InvoiceGenerator(
+        purchase_order_headers=inventory_data.purchase_order_headers,
+        purchase_order_lines=inventory_data.purchase_order_lines,
+        suppliers=inventory_data.suppliers,
+        goods_movements=inventory_data.goods_movements,
+        rng=generator.rng,
+        uom=config.domain["uom_default"],
+        period_end=generator.end,
+    )
+    invoice_data = invoice_generator.generate()
+
+    # Shipments come from the receipts that already exist, and stamp
+    # `inbound_delivery` onto those movement rows in place (ADR-026). Derived
+    # rather than generated independently so shipped quantity ties to received
+    # quantity exactly, and so there is no second row count to disagree with
+    # the first -- the fault `mes.order_quantity_for_profile` exists to prevent.
+    shipment_outcome = shipments.build(
+        config=config,
+        movements=inventory_data.goods_movements,
+        po_headers=inventory_data.purchase_order_headers,
+        po_lines=inventory_data.purchase_order_lines,
+        period_start=generator.start,
+        period_end=generator.end,
+    )
+
+    # One mapping per source system, merged in LOAD_ORDER. Building the dict
+    # by iterating LOAD_ORDER rather than by merging means an extract declared
+    # in the order but produced by nobody raises here instead of silently
+    # missing from the output.
     mes_generator = mes.MesGenerator(
         order_plan=production_data.order_plan,
         steps=config.domain["mes_steps"],

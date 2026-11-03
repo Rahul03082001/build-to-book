@@ -16,6 +16,11 @@ select
     case movement_type
         when '101' then 'RECEIPT'
         when '261' then 'ISSUE'
+        -- Opening stock (ADR-027). A separate direction rather than folded in
+        -- with receipts, because it is not a purchase: there is no purchase
+        -- order, no supplier and no GR/IR entry behind it, and a report that
+        -- counted it as a receipt would overstate the period's purchasing.
+        when '561' then 'OPENING'
     end                              as movement_direction,
     material_number,
     plant                            as plant_code,
@@ -31,6 +36,10 @@ select
     to_char(posting_date, 'YYYY-MM') as posting_period,
     po_number,
     po_item,
+    -- The production order an issue was consumed by (ADR-027). Null on
+    -- receipts, so order costing joins on this and purchase analysis joins on
+    -- po_number; a movement carries exactly one of the two.
+    order_number,
     -- The inbound delivery this receipt arrived on (ADR-026). Null on issues,
     -- which have no supplier shipment -- so a join to shipments must be an
     -- outer one, and `is_inbound_receipt` says which rows can have a match.

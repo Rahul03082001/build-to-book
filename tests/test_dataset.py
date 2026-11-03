@@ -331,63 +331,64 @@ def test_streaming_writer_rejects_a_missing_column(tmp_path: pathlib.Path) -> No
         writers.write_extract_streaming(spec, [[{"id": "1"}]], tmp_path, STAMP)
 
 
-def test_adding_bom_extracts_did_not_change_the_inventory_data(
-    cfg: genconfig.GeneratorConfig, tmp_path: pathlib.Path
+def test_the_master_data_is_independent_of_the_generators_that_follow_it(
+    cfg: genconfig.GeneratorConfig,
 ) -> None:
-    """Generation order independence.
+    """The masters must not shift when later generators are added or changed.
 
-    BOMs are generated after the inventory slice and draw from the same seeded
-    generator. If they consumed random state the inventory data depended on,
-    every figure in the README would have silently changed when Phase 2
-    started -- so the inventory extracts must be byte-identical with and
-    without the BOM step.
+    This replaces a test that asserted the whole inventory slice was
+    byte-identical with and without the BOM step. That premise is gone:
+    ADR-027 made purchase quantities depend on what production will consume,
+    and made the goods issues *be* that consumption, so inventory now depends
+    on the bill of materials by design. Keeping the old assertion would be
+    asserting the coupling had not happened.
+
+    What survives is the part that still matters. The material, vendor and
+    standard cost masters are drawn before anything downstream exists, so they
+    must be identical whether or not the rest of the run happens. If they were
+    not, every figure in the README would move whenever a later generator
+    changed how many random draws it made -- the fault the original test was
+    written to catch, and still worth catching.
     """
-    data, _ = dataset.build(cfg, "demo")
-    inventory_only = inventory.InventoryGenerator(cfg, "demo").generate()
+    standalone = inventory.InventoryGenerator(cfg, "demo")
+    materials = standalone.materials()
+    suppliers = standalone.suppliers()
+    standard_costs, _ = standalone.standard_costs(materials)
 
-    for name in inventory_only.as_mapping():
-        stamped = dataset.STAMPED_COLUMNS.get(name, ())
-        composed_rows = data.as_mapping()[name]
-        alone_rows = inventory_only.as_mapping()[name]
-        assert len(composed_rows) == len(alone_rows), (
-            f"{name} has {len(composed_rows)} rows composed and {len(alone_rows)} alone"
-        )
+    built, _ = dataset.build(cfg, "demo")
+    extracts = built.as_mapping()
 
-        if not stamped:
-            # Byte comparison where nothing downstream touches the extract.
-            composed = writers.write_extract(
-                dataset.EXTRACT_SPECS[name], composed_rows, tmp_path / "composed", STAMP
-            )
-            alone = writers.write_extract(
-                inventory.EXTRACT_SPECS[name], alone_rows, tmp_path / "alone", STAMP
-            )
-            assert composed.sha256 == alone.sha256, (
-                f"{name} changed when the BOM generator was added"
-            )
-            continue
+    assert extracts["materials"] == materials
+    assert extracts["suppliers"] == suppliers
+    assert extracts["standard_costs"] == standard_costs
 
-        # `goods_movements` carries `inbound_delivery`, which a later generator
-        # fills in (ADR-026), so the bytes legitimately differ in that column
-        # and only there. Comparing every OTHER column still answers the
-        # question this test asks -- did adding later generators disturb the
-        # random state the inventory data depends on -- and comparing the whole
-        # row would answer a different, now-false question.
-        for index, (composed_row, alone_row) in enumerate(
-            zip(composed_rows, alone_rows, strict=True)
-        ):
-            trimmed_composed = {k: v for k, v in composed_row.items() if k not in stamped}
-            trimmed_alone = {k: v for k, v in alone_row.items() if k not in stamped}
-            assert trimmed_composed == trimmed_alone, (
-                f"{name} row {index} changed when later generators were added, "
-                f"in a column none of them is declared to stamp"
-            )
-            # And the stamped column must actually be unset before stamping,
-            # or "stamped later" is not what is happening.
-            for column in stamped:
-                assert alone_row[column] is None, (
-                    f"{name} row {index} already has {column} set before the "
-                    "generator that stamps it has run"
-                )
+
+def test_the_masters_are_memoised_so_asking_twice_is_the_same_answer(
+    cfg: genconfig.GeneratorConfig,
+) -> None:
+    """Calling `materials()` twice must not draw twice.
+
+    `dataset.build` needs the material master before the bill of materials and
+    again inside `generate()`. Without memoisation the second call drew from
+    the shared generator and returned a *different* master: the BOM referenced
+    materials the cost windows had never heard of, and generation died on a
+    KeyError for material 1000007.
+    """
+    generator = inventory.InventoryGenerator(cfg, "demo")
+    assert generator.materials() == generator.materials()
+    assert generator.suppliers() == generator.suppliers()
+
+    # And the second call must not consume randomness, or everything generated
+    # afterwards shifts depending on how many times somebody happened to ask.
+    once_gen = inventory.InventoryGenerator(cfg, "demo")
+    once = once_gen.purchase_orders(once_gen.materials(), once_gen.suppliers())
+
+    twice_gen = inventory.InventoryGenerator(cfg, "demo")
+    twice_gen.materials()
+    twice_gen.suppliers()
+    twice = twice_gen.purchase_orders(twice_gen.materials(), twice_gen.suppliers())
+
+    assert once == twice, "asking for the masters twice changed what came after"
 
 
 def test_stamped_columns_are_real_columns_of_their_extract() -> None:
@@ -422,3 +423,57 @@ def test_a_stamped_column_is_populated_by_the_end_of_a_full_build(
             assert populated > 0, (
                 f"{name}.{column} is declared stamped but no row has a value after a full build"
             )
+
+
+def test_every_rack_configuration_has_trays_that_can_be_built(
+    cfg: genconfig.GeneratorConfig, built: tuple[dataset.Dataset, list]
+) -> None:
+    """A rack with no sub-assemblies is unbuildable, and was silently possible.
+
+    Racks used to draw their trays from the whole CHASSIS group while only a
+    prepared pool had bills of materials of their own. A rack that happened to
+    draw none of the pool had every tray skipped as a dead end and came out
+    empty. Nothing downstream asked whether a rack configuration had content,
+    so it would have produced orders that consumed nothing.
+
+    Latent from the start. It first fired when ADR-027 reordered generation and
+    the draws fell differently -- which is the whole argument for not trusting
+    the generator: this is a property of the data, not of the code path that
+    happened to run.
+    """
+    data, _ = built
+    assert data.rack_configurations
+
+    empty = sorted(rack for rack, trays in data.rack_configurations.items() if not trays)
+    assert not empty, f"rack configuration(s) with no trays: {empty}"
+
+    # And every named tray must itself have a bill of materials, or it is a
+    # leaf posing as a sub-assembly.
+    extracts = data.as_mapping()
+    parents_with_boms = {header["material_number"] for header in extracts["bom_headers"]}
+    for rack, trays in data.rack_configurations.items():
+        for tray in trays:
+            assert tray in parents_with_boms, (
+                f"rack {rack} names tray {tray}, which has no bill of materials"
+            )
+
+
+def test_every_production_order_consumes_something(
+    built: tuple[dataset.Dataset, list],
+) -> None:
+    """The downstream consequence the test above prevents.
+
+    An empty rack configuration produces orders that consume no components, and
+    those orders would then report a zero cost of production while MES happily
+    recorded units passing test. Worth asserting separately: the cause is in the
+    bill of materials, but this is the symptom a reviewer would actually see.
+    """
+    data, _ = built
+    extracts = data.as_mapping()
+    consuming = {line["order_number"] for line in extracts["component_consumption"]}
+    orders = {order["order_number"] for order in extracts["production_orders"]}
+    assert orders
+    assert orders == consuming, (
+        f"{len(orders - consuming)} order(s) consume nothing, so their cost of "
+        "production is zero while MES records units built"
+    )

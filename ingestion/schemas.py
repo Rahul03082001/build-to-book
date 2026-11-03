@@ -40,7 +40,9 @@ _SHA256 = r"^[0-9a-f]{64}$"
 
 # Movement types this slice knows about (ADR-002). An unknown type would get a
 # sign of zero in the mart and silently drop out of the balance.
-_MOVEMENT_TYPES = ["101", "261"]
+#: 101 goods receipt, 261 issue to a production order, 561 initial stock
+#: entry (opening stock, ADR-027).
+_MOVEMENT_TYPES = ["101", "261", "561"]
 
 #: Inbound delivery statuses. RECEIVED means a goods receipt exists against
 #: it; IN_TRANSIT means the shipment is still on the water at period end,
@@ -394,6 +396,10 @@ SCHEMAS: dict[str, DataFrameSchema] = {
             # Null on goods issues.
             "po_number": _text(nullable=True),
             "po_item": _nullable_positive_int(),
+            # The production order an issue was consumed by (ADR-027). Null on
+            # receipts; the two references are mutually exclusive and a test
+            # asserts exactly one is present per movement.
+            "order_number": _text(nullable=True),
             "entered_by": _code(),
             # The inbound delivery this receipt arrived on (ADR-026). Null on
             # issues, which have no supplier shipment, and null on a receipt

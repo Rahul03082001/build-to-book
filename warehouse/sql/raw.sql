@@ -157,6 +157,11 @@ CREATE TABLE IF NOT EXISTS raw.goods_movements (
     -- Null on goods issues, which reference no purchase order.
     po_number               text,
     po_item                 integer,
+    -- The production order an issue was consumed by (ADR-027). Null on
+    -- receipts. Issues used to reference nothing at all, which is why
+    -- production consumption and inventory issues could drift 58-fold apart
+    -- with no join able to compare them.
+    order_number            text,
     entered_by              text           NOT NULL,
     -- The inbound delivery this receipt arrived on (ADR-026). Null on issues,
     -- which have no supplier shipment. The link is recorded here rather than
@@ -173,6 +178,7 @@ CREATE TABLE IF NOT EXISTS raw.goods_movements (
 -- the index below fails on a column that is not there, which is how this was
 -- found.
 ALTER TABLE raw.goods_movements ADD COLUMN IF NOT EXISTS inbound_delivery text;
+ALTER TABLE raw.goods_movements ADD COLUMN IF NOT EXISTS order_number text;
 
 CREATE UNIQUE INDEX IF NOT EXISTS goods_movements_nk
     ON raw.goods_movements (material_document, fiscal_year, material_document_item);
@@ -181,6 +187,10 @@ CREATE INDEX IF NOT EXISTS goods_movements_posting_idx
 -- The delivery-performance join reads every receipt by delivery.
 CREATE INDEX IF NOT EXISTS goods_movements_delivery_idx
     ON raw.goods_movements (inbound_delivery);
+-- Order costing and the consumption-to-issue reconciliation both read issues
+-- by order.
+CREATE INDEX IF NOT EXISTS goods_movements_order_idx
+    ON raw.goods_movements (order_number);
 
 -- Inbound deliveries, shaped on SAP's LIKP and LIPS. An advance ship notice
 -- is a promise that arrives before the goods do, so every receipt records the

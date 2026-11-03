@@ -122,6 +122,7 @@ class BomGenerator:
         self.rack_configuration_count = rack_configuration_count
         self._bom_numbers = ids.bom_numbers()
 
+        self._materials = list(materials)
         by_group: dict[str, list[dict[str, Any]]] = {}
         for material in materials:
             by_group.setdefault(material["material_group"], []).append(material)
@@ -130,6 +131,20 @@ class BomGenerator:
     def _pick(self, group: str, count: int) -> list[dict[str, Any]]:
         """Distinct materials from a group, deterministically."""
         pool = self._by_group.get(group, [])
+        if not pool:
+            return []
+        count = min(count, len(pool))
+        indices = self.rng.choice(len(pool), size=count, replace=False)
+        return [pool[int(i)] for i in sorted(indices)]
+
+    def _pick_from(self, numbers: Sequence[str], count: int) -> list[dict[str, Any]]:
+        """Distinct materials chosen from an explicit list of material numbers.
+
+        Used where the choice has to come from a prepared subset -- the trays
+        that have their own bill of materials -- rather than from a whole
+        material group.
+        """
+        pool = [m for m in self._materials if m["material_number"] in set(numbers)]
         if not pool:
             return []
         count = min(count, len(pool))
@@ -217,13 +232,22 @@ class BomGenerator:
             )
 
             position = 0
-            trays_in_rack = self._pick("CHASSIS", self._between(*TRAYS_PER_RACK))
+            # Chosen from the trays that HAVE a bill of materials, not from the
+            # whole CHASSIS group.
+            #
+            # Picking from the group meant a rack could draw only trays outside
+            # `tray_pool`; each was then skipped as a dead end and the rack came
+            # out with no trays at all -- unbuildable, and silently so, because
+            # nothing downstream asked whether a rack configuration had any
+            # content. Latent from the start; it first fired when ADR-027
+            # reordered generation and the draws fell differently.
+            trays_in_rack = self._pick_from(list(tray_boms), self._between(*TRAYS_PER_RACK))
             tray_numbers: list[str] = []
             for tray in trays_in_rack:
                 if tray["material_number"] not in tray_boms:
-                    # A tray with no BOM of its own would be a dead end in the
-                    # explosion; skip rather than emit a leaf that looks like a
-                    # sub-assembly.
+                    # Unreachable now that the pick is drawn from tray_boms.
+                    # Kept as a guard: a future change to the pool should fail
+                    # a test rather than emit a leaf posing as a sub-assembly.
                     continue
                 position += 1
                 tray_numbers.append(tray["material_number"])

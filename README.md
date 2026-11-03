@@ -92,7 +92,9 @@ report success.
 ```bash
 make all                 # rebuild everything from scratch
 make data PROFILE=full   # the large local profile: 4,989,995 MES events
-                         # (seed 20261101; 44.6s, 298 MB peak RSS)
+                         # (seed 20261101; 114.0s, 408 MB peak RSS)
+                         # Volume profile only -- its monetary totals are not
+                         # business figures. See generator/config.yaml.
 ```
 
 ---

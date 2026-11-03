@@ -533,6 +533,75 @@ SHIPMENT_REFERENCES_RESOLVE = Check(
 )
 
 # ---------------------------------------------------------------------------
+# CTRL-018: production consumption reconciles to inventory issues.
+#
+# The control whose absence let the two drift 58-fold apart (ADR-027).
+#
+# `component_consumption` says what the factory consumed; the type 261
+# movements say what left inventory. They used to be generated independently
+# and share no key, so production consumed 1,288,414 units against 17,660
+# issued and every control passed -- because neither CTRL-003 nor CTRL-010
+# reads the consumption extract, and a reconciliation cannot find an error in
+# data it does not read.
+#
+# Exact on a clean run, because the issues are now derived from consumption.
+# That is what makes it usable: a difference is a real finding rather than
+# noise, the same property CTRL-005 depends on.
+#
+# Compared per (order, material) rather than in total. A grand total can
+# reconcile while two orders are wrong in opposite directions, and that is the
+# kind of agreement that looks like proof.
+# ---------------------------------------------------------------------------
+CONSUMPTION_TO_ISSUES = Check(
+    check_id="CTRL-018",
+    name="Every component consumed is a goods issue of the same quantity",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "Production consumption and inventory issues must describe the same physical "
+        "movement of components. If they diverge, the inventory balance, the cost of "
+        "production and every per-order cost are each computed from a different set of "
+        "events, and no single figure is wrong in a way anyone can point at."
+    ),
+    sql="""
+        with consumed as (
+            select
+                order_number,
+                component_material_number as material_number,
+                sum(quantity_consumed)    as quantity
+            from {staging}.stg_component_consumption
+            group by order_number, component_material_number
+        ),
+
+        issued as (
+            select
+                order_number,
+                material_number,
+                sum(abs(quantity)) as quantity
+            from {staging}.stg_goods_movements
+            where
+                movement_direction = 'ISSUE'
+                and order_number is not null
+            group by order_number, material_number
+        )
+
+        select
+            'order ' || coalesce(c.order_number, i.order_number)
+                || ' material ' || coalesce(c.material_number, i.material_number)
+                || ': consumed ' || coalesce(c.quantity, 0)
+                || ', issued ' || coalesce(i.quantity, 0)
+                as exception_detail
+        from consumed as c
+        full outer join issued as i
+            on
+                c.order_number = i.order_number
+                and c.material_number = i.material_number
+        where coalesce(c.quantity, 0) <> coalesce(i.quantity, 0)
+        order by 1
+    """,
+)
+
+# ---------------------------------------------------------------------------
 # CTRL-005: MES versus ERP completion.
 #
 # Production output reported to finance must match what the factory actually
@@ -581,6 +650,7 @@ PHASE_1_CHECKS: tuple[Check, ...] = (
     THREE_WAY_MATCH,
     INVOICE_REFERENCES_A_PURCHASE_ORDER,
     SHIPMENT_REFERENCES_RESOLVE,
+    CONSUMPTION_TO_ISSUES,
     MES_TO_ERP_COMPLETION,
     SUBLEDGER_TO_GL,
     INVENTORY_VALUE_AGREES_WITH_COST,

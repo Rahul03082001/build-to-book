@@ -44,6 +44,7 @@ SOX-style controls. Nothing here claims SOX compliance (ADR-019).
 | [ADR-024](#adr-024-keep-every-extract-as-csv-even-at-five-million-rows) | 2026-11-02 | Keep every extract as CSV, even at five million rows | Accepted |
 | [ADR-025](#adr-025-explode-the-bom-in-dbt-not-in-the-generator) | 2026-11-02 | Explode the BOM in dbt, not in the generator | Accepted |
 | [ADR-026](#adr-026-record-the-inbound-delivery-on-the-goods-receipt) | 2026-11-02 | Record the inbound delivery on the goods receipt | Accepted |
+| [ADR-027](#adr-027-one-physical-flow-of-components-issues-derive-from-consumption) | 2026-11-03 | One physical flow of components: issues derive from consumption | Accepted |
 
 ---
 
@@ -1971,3 +1972,121 @@ docs/metric_definitions.md records the open questions it must answer. Tests
 assert that every receipt names a delivery, that every delivery ships before
 its receipt posts, and that shipped quantities tie to received quantities per
 delivery line.
+
+## ADR-027: One physical flow of components: issues derive from consumption
+
+- Date: 2026-11-03
+- Status: Accepted
+- Jira: BTB-35 | PR/commit: BTB-35-finance-and-trial-balance
+- Area: Data
+
+### Context
+
+Found while starting BTB-35, which asks for journal entries covering goods
+issues and production variances. The project had **two unrelated physical
+flows of the same components**, and the numbers were not close:
+
+| flow | units | posts to GL | in inventory balance |
+|---|---|---|---|
+| `component_consumption` | 1,288,414 | no | no |
+| `goods_movements` type 261 | 17,660 | yes | yes |
+
+They share no key. Production consumed 58 times more components than
+purchasing ever received (22,129 units), which is physically impossible.
+
+Nothing caught it. `component_consumption` posts nothing and is absent from
+the inventory balance, so the only two controls that could have noticed —
+CTRL-003 (subledger to GL) and CTRL-010 (no negative on-hand) — both read the
+movements, where the figure is small and self-consistent. **A reconciliation
+cannot find an error in data it does not read.**
+
+It is not a new fault. At the original order quantity of `randint(1, 9)` the
+implied consumption was roughly 174,000 units against 17,660 issued, already
+about tenfold. BTB-33 raised the demo quantity to 37 units per order so the
+generated MES event count would match the declared one, and that deepened an
+existing inconsistency to 58-fold. Fixing one declared number against reality
+exposed another that nothing was checking.
+
+Why it blocks BTB-35 rather than being a tidy-up: the story's production
+variance is actual consumption against standard absorption. Posting work in
+process from one flow and relieving it from the other would put the whole
+58-fold discrepancy into the variance account, so the headline figure the
+story exists to produce would have been a fabrication that balanced.
+
+### Options considered
+
+1. **One physical flow.** Generate the 261 issues from
+   `component_consumption`, keyed on the production order, and scale purchasing
+   so receipts cover what production consumes. The quantity ledger, the
+   production story and the GL then describe the same events. Largest change:
+   every published inventory, GL, invoice and three-way-match figure moves, and
+   CTRL-003, CTRL-004 and CTRL-010 all need re-proving.
+
+2. **Scale purchasing only**, leaving the two issue streams separate. Smaller,
+   and inventory stops being impossible. But the issues still bear no relation
+   to what production consumed, so work in process reconciles to nothing either
+   way and the variance stays meaningless. Arithmetic plausibility without
+   coherence.
+
+3. **Declare `component_consumption` a planning artefact** — the exploded BOM
+   requirement rather than a movement — and post only from the 261 issues.
+   Nothing published moves and the financial chain is buildable immediately.
+   But then no actual-versus-standard variance is computable at all, because
+   the only actual-consumption data has been declared non-physical. Criterion 1
+   would be met in name only, and the 58-fold gap would stay in the data with
+   no control over it.
+
+### Decision
+
+Option 1. `component_consumption` becomes the source of the 261 issues rather
+than a parallel account of them, `goods_movements` gains an `order_number` so
+an issue names the order it was consumed by, and purchase quantities are scaled
+so receipts cover consumption plus the configured retention.
+
+A new control reconciles the two: every component consumption line must appear
+as a goods issue, with the same quantity.
+
+### Reasons
+
+It is the only option under which the three stories the warehouse tells —
+what was bought, what was built, and what the books say — are about the same
+physical events. The others leave a reconciliation that cannot fail because
+the two sides are unrelated.
+
+It makes the variance real. Actual consumption against standard absorption is
+the metric BTB-35 exists to produce and Phase 3 reports on; it is only
+meaningful when both sides measure the same material.
+
+And it closes the gap that let this happen: there was no control tying
+production consumption to inventory issues, so the two could drift without
+limit. Adding one means the next such divergence fails a run rather than
+waiting for someone to compare two numbers by hand.
+
+The cost is accepted deliberately: every figure in the README that derives
+from inventory, GL or invoices changes with this commit, and each is re-earned
+from an actual run rather than carried over.
+
+### Consequences
+
+Easier: one flow to reason about; issues carry the order that consumed them, so
+order costing is a keyed join; and production variance becomes computable.
+
+Harder: purchase quantities rise by roughly seventy times to cover production,
+which changes every monetary total in the project. The three-way match is
+affected because invoices follow receipts, so CTRL-004's figures move. Issues
+must still be bounded by what is on hand at the moment of issue, and that
+bound is now driven by production demand rather than by a configured ratio —
+so a profile whose production outruns its purchasing fails loudly instead of
+going quietly negative.
+
+`issues_per_receipt` is removed from the configuration. Issue volume is no
+longer a ratio to invent; it is what the orders consumed.
+
+### How a reviewer can verify it
+
+`make data && make reload && make build && make controls` on a clean run:
+CTRL-003 ties the subledger to the GL, CTRL-010 shows no negative on-hand, and
+the new consumption-to-issue control reports zero exceptions. The generator
+test suite asserts that every consumption line has a matching issue of the same
+quantity, that total receipts exceed total consumption, and that no material
+goes negative at any point in the posting sequence.

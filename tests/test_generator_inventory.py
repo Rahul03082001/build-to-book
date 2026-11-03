@@ -44,8 +44,34 @@ def cfg() -> genconfig.GeneratorConfig:
 
 @pytest.fixture(scope="module")
 def data(cfg: genconfig.GeneratorConfig) -> inventory.InventoryData:
-    """Generate the demo profile once for the whole module."""
-    return inventory.InventoryGenerator(cfg, "demo").generate()
+    """The inventory extracts out of a **full** build, once per module.
+
+    The inventory slice can no longer be generated on its own. Its purchase
+    quantities are sized to what production will consume, and its goods issues
+    *are* that consumption (ADR-027), so generating it in isolation yields
+    receipts with no issues at all -- closing inventory equal to 100% of
+    receipts, which is exactly what three tests in this module reported when
+    the fixture still did that.
+
+    The coupling is deliberate: inventory and production describe one physical
+    flow rather than two unrelated ones. A fixture that pretends otherwise is
+    testing a configuration the project no longer produces.
+    """
+    from generator import dataset
+
+    built, _ = dataset.build(cfg, "demo")
+    extracts = built.as_mapping()
+    return inventory.InventoryData(
+        materials=extracts["materials"],
+        suppliers=extracts["suppliers"],
+        standard_costs=extracts["standard_costs"],
+        purchase_order_headers=extracts["purchase_order_headers"],
+        purchase_order_lines=extracts["purchase_order_lines"],
+        goods_movements=extracts["goods_movements"],
+        inventory_revaluations=extracts["inventory_revaluations"],
+        gl_postings=extracts["gl_postings"],
+        cost_windows=built.cost_windows,
+    )
 
 
 @pytest.fixture(scope="module")

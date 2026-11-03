@@ -92,11 +92,16 @@ models:
         description: Part of the key -- document numbers repeat across years (ADR-020).
         data_tests: [not_null]
       - name: movement_direction
+        description: >
+          RECEIPT, ISSUE or OPENING, derived from the movement type. OPENING is
+          stock the business already held when the window opened (ADR-027) --
+          kept separate from RECEIPT because it is not a purchase, so counting
+          it as one would overstate the period's purchasing.
         data_tests:
           - not_null
           - accepted_values:
               arguments:
-                values: ["RECEIPT", "ISSUE"]
+                values: ["RECEIPT", "ISSUE", "OPENING"]
       - name: material_number
         data_tests:
           - not_null

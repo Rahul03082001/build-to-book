@@ -24,10 +24,33 @@ profiles:
     rack_configurations: 4
     purchase_order_lines: 1200
     production_orders: 400
-    mes_events: 60000
+    # 5,000, not 60,000. This number sets the order quantity, which sets how
+    # many racks are built, which sets how much material is bought -- and at
+    # 60,000 the demo profile implied 14,800 racks a quarter, about $60B a year
+    # of component purchasing. Four times Supermicro's revenue.
+    #
+    # It was invisible until ADR-027 made purchasing cover consumption: before
+    # that, production volume had no monetary consequence at all, so these four
+    # profile numbers were never checked against each other. 5,000 gives 1,200
+    # racks a quarter, roughly $4.9B a year, which is a manufacturer somebody
+    # would recognise -- and is still ample for yield, rework and per-step
+    # failure analytics.
+    mes_events: 5000
 
   full:
-    description: Local profile for the performance tuning study. Not hosted.
+    # Deliberately NOT a plausible business, and that has to be said out loud.
+    # 5,000,000 events divided by about four events per unit is some 1.2 million
+    # racks, and at roughly $1M of components each that is over a trillion
+    # dollars a quarter. No arrangement of orders changes it: the event count
+    # and the unit cost are what they are.
+    #
+    # The profile exists to prove the pipeline handles five million rows
+    # (ADR-016, ADR-024), not to describe a company. Monetary totals from a
+    # `full` run are not business figures and must never be quoted as any.
+    description: >-
+      Local profile for the performance tuning study. Not hosted, and not a
+      plausible business: its volumes are chosen to exercise five million rows,
+      so its monetary totals are not business figures.
     months: 12
     period_start: "2025-11-01"
     materials: 300
@@ -86,11 +109,11 @@ domain:
   currency: USD
   uom_default: EA
 
-  # Inventory turnover. Goods issues are generated per goods receipt rather
-  # than from a target posting count: deriving them from a posting target gave
-  # ~8.5 issues per receipt on the full profile and drained every material to
-  # zero closing stock -- arithmetically valid, commercially nonsense.
-  issues_per_receipt: 2.4
+  # `issues_per_receipt` was removed by ADR-027. Issue volume is no longer a
+  # ratio to invent: goods issues ARE what the production orders consumed, so
+  # the quantity ledger and the production story describe one physical flow.
+  # The ratio it replaced was the mechanism by which the two could drift
+  # 58-fold apart with nothing to notice.
 
   # Share of cumulative receipts kept on hand per material, so closing stock
   # is a few weeks of supply. Inventory value and aging are this slice's

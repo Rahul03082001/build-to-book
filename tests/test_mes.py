@@ -81,6 +81,41 @@ def streamed(cfg: genconfig.GeneratorConfig) -> dict[str, Any]:
     }
 
 
+def _generator_big_enough_to_chunk(
+    cfg: genconfig.GeneratorConfig, units: int = 40_000
+) -> mes.MesGenerator:
+    """A MES generator with enough units to fill several chunks.
+
+    Driven directly rather than through a profile. The chunking and memory
+    tests used to consume the demo profile's stream, which worked only while
+    that profile declared 60,000 events; when it dropped to 5,000 (one twelfth
+    of a chunk) the whole extract came back as a single chunk and both tests
+    failed -- not because streaming broke, but because they were measuring a
+    configuration value rather than the mechanism.
+
+    `units` is chosen to exceed CHUNK_SIZE several times over at roughly four
+    events per unit, so the behaviour under test is present regardless of what
+    any profile declares.
+    """
+    plan = {
+        f"10000{index:05d}": {
+            "material_number": "1000000",
+            "target_quantity": units,
+            "start_date": dt.date(2026, 8, 1),
+            "finish_date": dt.date(2026, 8, 20),
+        }
+        for index in range(1)
+    }
+    return mes.MesGenerator(
+        order_plan=plan,
+        steps=cfg.domain["mes_steps"],
+        failure_codes=cfg.domain["failure_codes"],
+        max_rework_attempts=int(cfg.domain["max_rework_attempts"]),
+        seed=cfg.seed + 1,
+        period_end=dt.date(2026, 10, 31),
+    )
+
+
 # ---------------------------------------------------------------------------
 # The grain
 # ---------------------------------------------------------------------------
@@ -273,18 +308,28 @@ def test_demo_event_count_is_close_to_the_declared_target(
     )
 
 
-def test_generation_streams_in_chunks(streamed: dict[str, Any]) -> None:
-    """A single chunk would mean the whole extract is in memory after all."""
-    sizes = streamed["chunk_sizes"]
-    assert len(sizes) > 1, "MES was yielded as one chunk, so it is not streaming"
+def test_generation_streams_in_chunks(cfg: genconfig.GeneratorConfig) -> None:
+    """A single chunk would mean the whole extract is in memory after all.
+
+    Driven from a generator sized for the job, not from a profile -- see
+    `_generator_big_enough_to_chunk`.
+    """
+    generator = _generator_big_enough_to_chunk(cfg)
+    sizes = [len(chunk) for chunk in generator.stream()]
+
+    assert len(sizes) > 2, f"MES came back in {len(sizes)} chunk(s), so it is not streaming"
     # A chunk may overshoot by at most one unit's events, because a serial's
     # route is deliberately never split across chunks.
-    cfg = genconfig.load()
     overshoot = mes.max_events_per_unit(
         len(cfg.domain["mes_steps"]), int(cfg.domain["max_rework_attempts"])
     )
     assert max(sizes) <= mes.CHUNK_SIZE + overshoot, (
         f"a chunk of {max(sizes)} exceeds {mes.CHUNK_SIZE} by more than one unit"
+    )
+    # Every chunk but the last should be full, or the buffer is flushing early
+    # and "chunked" would mean nothing.
+    assert all(size >= mes.CHUNK_SIZE for size in sizes[:-1]), (
+        f"a chunk before the last was short: {sizes[:-1]}"
     )
 
 
@@ -309,19 +354,25 @@ def test_streaming_mes_does_not_grow_memory_with_row_count(
     """ADR-024's reason for existing, on the real generator rather than a probe.
 
     5,000,000 events held as dicts measured ~4.3 GB; streamed, the full profile
-    peaks at 289 MB. This checks the demo profile does not balloon, which is
-    the property that makes the full one possible.
+    peaks at 408 MB. This checks a stream several chunks long does not balloon,
+    which is the property that makes the full profile possible.
+
+    Sized here rather than taken from a profile: the demo profile's 5,000 events
+    are a fraction of one chunk, so writing them would demonstrate nothing about
+    streaming and the row-count assertion below would fail.
     """
-    data, _ = dataset.build(cfg, "demo")
+    generator = _generator_big_enough_to_chunk(cfg)
     spec = dataset.EXTRACT_SPECS["mes_unit_events"]
 
     before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     result = writers.write_extract_streaming(
-        spec, data.streams["mes_unit_events"](), tmp_path, dt.datetime(2026, 11, 2)
+        spec, generator.stream(), tmp_path, dt.datetime(2026, 11, 2)
     )
     after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
-    assert result.row_count > 10_000, "too few rows for this to mean anything"
+    assert result.row_count > mes.CHUNK_SIZE * 2, (
+        f"{result.row_count:,} rows is under two chunks, so this measures nothing"
+    )
     growth = (after - before) / max(before, 1)
     assert growth < 0.3, f"peak RSS grew {growth:.0%} writing {result.row_count:,} rows"
 
