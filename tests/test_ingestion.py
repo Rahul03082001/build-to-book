@@ -170,37 +170,6 @@ def test_rejection_detail_names_the_rule_that_failed(
 
 
 # ---------------------------------------------------------------------------
-# Source-side duplicates versus reruns (BTB-76, ADR-020)
-# ---------------------------------------------------------------------------
-def test_in_file_duplicate_is_rejected_not_skipped(
-    movements_frame: pd.DataFrame,
-) -> None:
-    """The distinction CTRL-001 depends on.
-
-    A row repeated inside one extract means the upstream interface posted
-    twice -- a finding. A row already in raw from an earlier run is a rerun.
-    A loader that only counted inserts could not tell them apart.
-    """
-    validated = schemas.schema_for("goods_movements").validate(movements_frame, lazy=True)
-    with_duplicate = pd.concat([validated, validated.iloc[[0]]], ignore_index=True)
-
-    surviving, rejected = loader._reject_in_file_duplicates("goods_movements", with_duplicate)
-
-    assert len(rejected) == 1
-    assert rejected[0].rule == loader.REJECT_DUPLICATE_NATURAL_KEY
-    assert "appears more than once" in rejected[0].detail
-    # The first occurrence survives: the legitimate posting still loads.
-    assert len(surviving) == len(validated)
-
-
-def test_clean_file_has_no_duplicates(movements_frame: pd.DataFrame) -> None:
-    validated = schemas.schema_for("goods_movements").validate(movements_frame, lazy=True)
-    surviving, rejected = loader._reject_in_file_duplicates("goods_movements", validated)
-    assert rejected == []
-    assert len(surviving) == len(validated)
-
-
-# ---------------------------------------------------------------------------
 # Batch identity and provenance (BTB-16)
 # ---------------------------------------------------------------------------
 def test_batch_ids_are_unique_and_time_sortable() -> None:
@@ -427,3 +396,61 @@ def test_value_total_is_summed_from_the_file_including_rejected_rows(
     assert total == decimal.Decimal("150.00"), (
         "the file's own sum must include the row that will be rejected"
     )
+
+
+# ---------------------------------------------------------------------------
+# Connecting to a database that is not there
+# ---------------------------------------------------------------------------
+def test_the_dsn_bounds_how_long_a_connection_attempt_waits() -> None:
+    """An unreachable warehouse must error, not wait.
+
+    libpq waits indefinitely by default, and a database that ACCEPTS a
+    connection and then never answers hangs instead of erroring. That happened:
+    Docker Desktop was installed on an external drive, the drive disconnected,
+    the daemon's mapped binaries went with it, and its orphaned port forwarder
+    kept accepting TCP on 5432 while Postgres was gone.
+
+    Every module that treats an unreachable warehouse as a skip depends on
+    `connect` raising OperationalError. A hang never raises one, so a
+    hundred-second suite sat blocked for fifteen minutes and reported nothing --
+    no failure, no skip, no output.
+    """
+    from ingestion import db
+
+    assert "connect_timeout=" in db.dsn()
+
+
+def test_the_connect_timeout_is_overridable() -> None:
+    """A cold hosted instance can take longer to accept than a container."""
+    import os
+
+    from ingestion import db
+
+    previous = os.environ.get("BTB_CONNECT_TIMEOUT")
+    os.environ["BTB_CONNECT_TIMEOUT"] = "37"
+    try:
+        assert "connect_timeout=37" in db.dsn()
+    finally:
+        if previous is None:
+            os.environ.pop("BTB_CONNECT_TIMEOUT", None)
+        else:
+            os.environ["BTB_CONNECT_TIMEOUT"] = previous
+
+
+def test_the_dsn_never_carries_a_password_it_was_not_given() -> None:
+    """The reason DSN assembly lives in one place: no credential in a log line."""
+    import os
+
+    from ingestion import db
+
+    previous = os.environ.get("POSTGRES_PASSWORD")
+    os.environ["POSTGRES_PASSWORD"] = ""
+    try:
+        assert "password=" not in db.dsn(), (
+            "an empty password must be omitted rather than emitted as password="
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("POSTGRES_PASSWORD", None)
+        else:
+            os.environ["POSTGRES_PASSWORD"] = previous

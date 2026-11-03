@@ -92,8 +92,42 @@ report success.
 ```bash
 make all                 # rebuild everything from scratch
 make data PROFILE=full   # the large local profile: 4,989,995 MES events
-                         # (seed 20261101; 44.6s, 298 MB peak RSS)
+                         # Volume profile only -- its monetary totals are not
+                         # business figures. See generator/config.yaml.
 ```
+
+### At target volume
+
+The `full` profile on a laptop, seed 20261101. Every figure is from the run the
+command beside it produces.
+
+| step | command | elapsed | peak RSS |
+| --- | --- | --- | --- |
+| generate 5,732,890 rows | `make data PROFILE=full` | 56.9s | 0.50 GB |
+| load into `raw` | `make reload` | 171.8s | 0.50 GB |
+| build 381 dbt nodes | `make build` | 21.8s | 0.20 GB |
+| run 22 controls | `make controls` | 3.7s | 0.14 GB |
+
+Peak memory never exceeds 0.50 GB at any step, because generation streams
+(ADR-024) and loading reads, validates and stages 100,000 rows at a time. The
+loader used to read each extract whole, which peaked at **4.0 GB** on the MES
+extract alone — streaming had been moved one step downstream rather than
+achieved. Chunking cost 13% more time for 88% less memory.
+
+Storage, against Neon's 1 GB free-tier cap (ADR-015):
+
+| profile | warehouse size |
+| --- | --- |
+| `demo` — hosted | **72–73 MB** |
+| `full` — local only | 1,931 MB |
+
+A range rather than a figure, because the publish gate retains two versions of
+each mart and the total moves by about a megabyte depending on how many
+publishes a database has seen. Both figures include those retained versions and
+the failure-demo sandbox schemas.
+
+The `full` profile exceeding the cap is why the hosted demo runs `demo`
+(ADR-016).
 
 ---
 
@@ -197,6 +231,16 @@ their source systems in Phase 2.
 | --- | --- | --- | --- | --- |
 | 1 | Duplicate goods receipts | CTRL-001 (zero rejected rows) | Preventive — rejected at load | 9 / 9 |
 | 2 | Backdated GL posting | CTRL-006 (closed-period integrity) | Preventive — blocks the publish | 4 / 4 |
+
+A third control fires on the first defect, and correctly. The duplicate
+injector repeats whole receipts **and their GL postings**, so the trial balance
+derived from those postings includes the duplicate and agrees with the file
+finance published. The loader then rejects the duplicate rows — which is the
+preventive control working — and the warehouse ledger no longer matches the
+trial balance it was given, so CTRL-019 reports the disagreement.
+
+That is not a false positive. It is what a preventive control does to a
+downstream reconciliation, and somebody has to resolve it.
 
 Reproduce with:
 

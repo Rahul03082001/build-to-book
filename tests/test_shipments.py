@@ -60,7 +60,7 @@ def lines(built: dataset.Dataset) -> list[dict[str, Any]]:
 
 @pytest.fixture(scope="module")
 def receipts(built: dataset.Dataset) -> list[dict[str, Any]]:
-    return [m for m in built.as_mapping()["goods_movements"] if m["movement_type"] == MVT_RECEIPT]
+    return [m for m in built.materialise()["goods_movements"] if m["movement_type"] == MVT_RECEIPT]
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +306,7 @@ def test_no_issue_carries_an_inbound_delivery(built: dataset.Dataset) -> None:
     above while making every issue look like it arrived from a supplier -- and
     those issues would then be counted in delivery performance.
     """
-    issues = [m for m in built.as_mapping()["goods_movements"] if m["movement_type"] == MVT_ISSUE]
+    issues = [m for m in built.materialise()["goods_movements"] if m["movement_type"] == MVT_ISSUE]
     assert issues, "no issues were generated, so this proves nothing"
     for issue in issues:
         assert issue["inbound_delivery"] is None, (

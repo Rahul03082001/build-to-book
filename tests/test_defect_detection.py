@@ -243,15 +243,36 @@ def test_the_backdated_posting_trips_only_the_closed_period_control(
 # ---------------------------------------------------------------------------
 # The gate: Phase 1's exit criterion
 # ---------------------------------------------------------------------------
+#: The controls two planted defects trip, and why there are three rather than
+#: two.
+#:
+#: CTRL-001 catches the duplicate receipt at the door: it is rejected during
+#: loading, which is what makes that defect preventive. CTRL-006 catches the
+#: backdated posting, which loads cleanly and is detected afterwards.
+#:
+#: CTRL-019 then fires as a CONSEQUENCE of the first, and correctly. The
+#: duplicate injector repeats whole receipts and their GL postings in the
+#: extract; the trial balance is derived from those postings, so it includes
+#: the duplicate and agrees with the file finance published. The loader then
+#: rejects the duplicate rows -- so the warehouse ledger no longer matches the
+#: trial balance it was given, and CTRL-019 says so.
+#:
+#: That is the most realistic thing in this scenario, not a false positive: a
+#: preventive control creates a genuine discrepancy between what the source
+#: system reported and what the warehouse holds, and somebody has to reconcile
+#: it. Asserting two controls here would have meant deleting that finding.
+EXPECTED_BLOCKING = {"CTRL-001", "CTRL-006", "CTRL-019"}
+
+
 def test_both_defects_block_the_publish(both_defects: dict[str, Any]) -> None:
     failed = {r.check.check_id for r in both_defects["summary"].blocking_failures}
-    assert failed == {"CTRL-001", "CTRL-006"}, (
-        f"expected CTRL-001 and CTRL-006, got {sorted(failed)}"
+    assert failed == EXPECTED_BLOCKING, (
+        f"expected {sorted(EXPECTED_BLOCKING)}, got {sorted(failed)}"
     )
 
     result = both_defects["publish"]
     assert result.status == publish_module.STATUS_BLOCKED
-    assert set(result.blocking_checks) == {"CTRL-001", "CTRL-006"}
+    assert set(result.blocking_checks) == EXPECTED_BLOCKING
 
 
 def test_reporting_keeps_the_last_good_dataset(
@@ -283,7 +304,7 @@ def test_the_block_is_recorded_with_both_controls_named(
             (both_defects["publish"].publish_id,),
         )
         blocking, reason = cursor.fetchone()
-    assert set(blocking) == {"CTRL-001", "CTRL-006"}
+    assert set(blocking) == EXPECTED_BLOCKING
     assert reason and "critical check" in reason
 
 

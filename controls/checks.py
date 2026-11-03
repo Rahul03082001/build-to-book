@@ -89,7 +89,7 @@ class Check:
 # ---------------------------------------------------------------------------
 SUBLEDGER_TO_GL = Check(
     check_id="CTRL-003",
-    name="Inventory subledger ties to GL account 130000",
+    name="Inventory subledger ties to the GL, per inventory account",
     shape=CheckShape.COMPARISON,
     severity=SEVERITY_CRITICAL,
     rationale=(
@@ -98,40 +98,62 @@ SUBLEDGER_TO_GL = Check(
     ),
     sql="""
         with movements as (
-            select posting_period, sum(amount_usd) as amount_usd
+            select
+                stock_account,
+                posting_period,
+                sum(amount_usd) as amount_usd
             from {marts}.fct_goods_movements
-            group by posting_period
+            group by stock_account, posting_period
         ),
 
         revaluations as (
-            select posting_period, sum(amount_usd) as amount_usd
+            -- Revaluations restate raw material already on hand, so they
+            -- belong to that account and nowhere else.
+            select
+                '130000'        as stock_account,
+                posting_period,
+                sum(amount_usd) as amount_usd
             from {marts}.fct_inventory_revaluations
             group by posting_period
         ),
 
         subledger as (
-            select posting_period, sum(amount_usd) as amount_usd
+            select
+                stock_account,
+                posting_period,
+                sum(amount_usd) as amount_usd
             from (
-                select posting_period, amount_usd from movements
+                select stock_account, posting_period, amount_usd from movements
                 union all
-                select posting_period, amount_usd from revaluations
+                select stock_account, posting_period, amount_usd from revaluations
             ) as combined
-            group by posting_period
+            group by stock_account, posting_period
         ),
 
         ledger as (
-            select posting_period, sum(signed_amount_usd) as amount_usd
+            select
+                gl_account      as stock_account,
+                posting_period,
+                sum(signed_amount_usd) as amount_usd
             from {marts}.fct_gl_postings
-            where gl_account = '130000'
-            group by posting_period
+            -- Only the accounts that hold stock. Work in process holds value
+            -- but no quantity: components issued to an order have no material
+            -- document of their own on the work-in-process side, so it has no
+            -- subledger of movements to tie to.
+            where gl_account in ('130000', '137000')
+            group by gl_account, posting_period
         )
 
         select
-            coalesce(l.posting_period, s.posting_period) as period,
-            coalesce(l.amount_usd, 0)                    as expected_value,
-            coalesce(s.amount_usd, 0)                    as actual_value
+            coalesce(l.stock_account, s.stock_account)
+                || ' ' || coalesce(l.posting_period, s.posting_period) as period,
+            coalesce(l.amount_usd, 0)                                  as expected_value,
+            coalesce(s.amount_usd, 0)                                  as actual_value
         from ledger as l
-        full outer join subledger as s on s.posting_period = l.posting_period
+        full outer join subledger as s
+            on
+                s.stock_account = l.stock_account
+                and s.posting_period = l.posting_period
         order by 1
     """,
 )
@@ -533,6 +555,161 @@ SHIPMENT_REFERENCES_RESOLVE = Check(
 )
 
 # ---------------------------------------------------------------------------
+# CTRL-019: the trial balance agrees with the general ledger.
+#
+# Two checks, because they fail for different reasons and a reviewer needs to
+# know which happened.
+#
+# The first is internal: a period's closing balances must net to zero. That is
+# the one assertion a trial balance exists to make, and a trial balance that
+# fails it is not evidence of anything.
+#
+# The second is the cross-system reconciliation ADR-029 exists for: the trial
+# balance finance published must agree with the postings they sent us. Exact on
+# a clean run, because the balances are derived from those same postings -- so
+# a difference is a real finding rather than noise, the property CTRL-005 and
+# CTRL-018 both depend on.
+# ---------------------------------------------------------------------------
+TRIAL_BALANCE_NETS_TO_ZERO = Check(
+    check_id="CTRL-019",
+    name="Every period's trial balance nets to zero",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "A period whose closing balances do not sum to zero means the ledger is not in "
+        "balance, so every figure drawn from it -- inventory, cost of sales, margin -- is "
+        "unsupported. It is the one assertion a trial balance exists to make."
+    ),
+    sql="""
+        select
+            'period ' || posting_period
+                || ' closing balances sum to ' || sum(closing_balance_usd)
+                as exception_detail
+        from {staging}.stg_trial_balance
+        group by posting_period
+        having sum(closing_balance_usd) <> 0
+        order by 1
+    """,
+)
+
+TRIAL_BALANCE_TO_LEDGER = Check(
+    check_id="CTRL-019",
+    name="The trial balance agrees with the general ledger postings",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "The trial balance is what finance reports; the postings are what the business "
+        "recorded. If they disagree, the reported figures are not the ones the ledger "
+        "supports, and nobody can say which of the two is wrong without this comparison."
+    ),
+    sql="""
+        with balances as (
+            select
+                gl_account,
+                posting_period,
+                -- The period's own movement, not the carried-forward balance:
+                -- comparing closing balances would make one early difference
+                -- fail every period after it, hiding where it started.
+                sum(closing_balance_usd - opening_balance_usd) as movement_usd
+            from {staging}.stg_trial_balance
+            group by gl_account, posting_period
+        ),
+
+        ledger as (
+            select
+                gl_account,
+                posting_period,
+                sum(signed_amount_usd) as movement_usd
+            from {staging}.stg_gl_postings
+            group by gl_account, posting_period
+        )
+
+        select
+            'account ' || coalesce(b.gl_account, l.gl_account)
+                || ' period ' || coalesce(b.posting_period, l.posting_period)
+                || ': trial balance ' || coalesce(b.movement_usd, 0)
+                || ', ledger ' || coalesce(l.movement_usd, 0)
+                as exception_detail
+        from balances as b
+        full outer join ledger as l
+            on
+                b.gl_account = l.gl_account
+                and b.posting_period = l.posting_period
+        where coalesce(b.movement_usd, 0) <> coalesce(l.movement_usd, 0)
+        order by 1
+    """,
+)
+
+# ---------------------------------------------------------------------------
+# CTRL-018: production consumption reconciles to inventory issues.
+#
+# The control whose absence let the two drift 58-fold apart (ADR-027).
+#
+# `component_consumption` says what the factory consumed; the type 261
+# movements say what left inventory. They used to be generated independently
+# and share no key, so production consumed 1,288,414 units against 17,660
+# issued and every control passed -- because neither CTRL-003 nor CTRL-010
+# reads the consumption extract, and a reconciliation cannot find an error in
+# data it does not read.
+#
+# Exact on a clean run, because the issues are now derived from consumption.
+# That is what makes it usable: a difference is a real finding rather than
+# noise, the same property CTRL-005 depends on.
+#
+# Compared per (order, material) rather than in total. A grand total can
+# reconcile while two orders are wrong in opposite directions, and that is the
+# kind of agreement that looks like proof.
+# ---------------------------------------------------------------------------
+CONSUMPTION_TO_ISSUES = Check(
+    check_id="CTRL-018",
+    name="Every component consumed is a goods issue of the same quantity",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "Production consumption and inventory issues must describe the same physical "
+        "movement of components. If they diverge, the inventory balance, the cost of "
+        "production and every per-order cost are each computed from a different set of "
+        "events, and no single figure is wrong in a way anyone can point at."
+    ),
+    sql="""
+        with consumed as (
+            select
+                order_number,
+                component_material_number as material_number,
+                sum(quantity_consumed)    as quantity
+            from {staging}.stg_component_consumption
+            group by order_number, component_material_number
+        ),
+
+        issued as (
+            select
+                order_number,
+                material_number,
+                sum(abs(quantity)) as quantity
+            from {staging}.stg_goods_movements
+            where
+                movement_direction = 'ISSUE'
+                and order_number is not null
+            group by order_number, material_number
+        )
+
+        select
+            'order ' || coalesce(c.order_number, i.order_number)
+                || ' material ' || coalesce(c.material_number, i.material_number)
+                || ': consumed ' || coalesce(c.quantity, 0)
+                || ', issued ' || coalesce(i.quantity, 0)
+                as exception_detail
+        from consumed as c
+        full outer join issued as i
+            on
+                c.order_number = i.order_number
+                and c.material_number = i.material_number
+        where coalesce(c.quantity, 0) <> coalesce(i.quantity, 0)
+        order by 1
+    """,
+)
+
+# ---------------------------------------------------------------------------
 # CTRL-005: MES versus ERP completion.
 #
 # Production output reported to finance must match what the factory actually
@@ -581,6 +758,9 @@ PHASE_1_CHECKS: tuple[Check, ...] = (
     THREE_WAY_MATCH,
     INVOICE_REFERENCES_A_PURCHASE_ORDER,
     SHIPMENT_REFERENCES_RESOLVE,
+    CONSUMPTION_TO_ISSUES,
+    TRIAL_BALANCE_NETS_TO_ZERO,
+    TRIAL_BALANCE_TO_LEDGER,
     MES_TO_ERP_COMPLETION,
     SUBLEDGER_TO_GL,
     INVENTORY_VALUE_AGREES_WITH_COST,

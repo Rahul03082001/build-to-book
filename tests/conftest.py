@@ -64,13 +64,16 @@ def generate_extracts(out_dir: pathlib.Path, defect_keys: tuple[str, ...] = ()) 
     data, planted = dataset.build(cfg, "demo", defect_keys)
 
     manifest = defects.DefectManifest(seed=cfg.seed, profile="demo", generated_at=EXTRACT_STAMP)
-    for record in planted:
-        manifest.add(record)
 
     # dataset.write_all, not a local loop over as_mapping(): streamed and
     # deferred extracts need the dispatch the CLI uses, and a helper with its
     # own copy of it falls behind the moment a source changes shape.
     dataset.write_all(data, out_dir, EXTRACT_STAMP)
+
+    # After write_all: defects are planted when the ledger is built, and the
+    # ledger is deferred (ADR-028), so `planted` is empty until then.
+    for record in planted:
+        manifest.add(record)
     manifest.write(out_dir / "defects_manifest.json")
     return manifest.to_dict()
 

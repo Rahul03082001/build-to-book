@@ -42,7 +42,7 @@ from typing import Any
 
 import numpy as np
 
-from generator import defects, ids
+from generator import accounts, defects, ids
 from generator.config import GeneratorConfig, Profile
 from generator.writers import ExtractSpec, money
 
@@ -55,16 +55,54 @@ D = decimal.Decimal
 # ---------------------------------------------------------------------------
 MVT_GOODS_RECEIPT = "101"  # GR for purchase order
 MVT_GOODS_ISSUE = "261"  # GI to production order
+#: Initial stock entry, SAP's 561. Opening stock: what the business already
+#: held when the reporting window opened.
+#:
+#: Needed because production cannot consume a component before it is received
+#: (ADR-027), and a manufacturer does not begin trading on the first day of a
+#: reporting period. Three attempts to arrange this through purchasing alone --
+#: quantities sized to demand, a three-week production ramp, then purchase
+#: lines planned per material with an early opening delivery -- each moved the
+#: first shortfall a day or two later and none removed it, because per-material
+#: demand varies by where the component sits on the bill of materials and no
+#: single rule covers every case.
+#:
+#: Opening stock is computed from the shortfall each material actually has, so
+#: it cannot go stale when the bill of materials or the order volume changes.
+#: It is also what the opening balance on a trial balance means.
+MVT_INITIAL_STOCK = "561"
 
-MOVEMENT_SIGN = {MVT_GOODS_RECEIPT: 1, MVT_GOODS_ISSUE: -1}
+#: Goods issue for delivery (ADR-028). Finished goods leave and cost of sale is
+#: recognised -- the only place COGS is posted in this project.
+MVT_DISPATCH = "601"
+
+MOVEMENT_SIGN = {
+    MVT_GOODS_RECEIPT: 1,
+    MVT_GOODS_ISSUE: -1,
+    MVT_INITIAL_STOCK: 1,
+    MVT_DISPATCH: -1,
+}
 
 # ---------------------------------------------------------------------------
 # Chart of accounts (the inventory corner of it).
 # ---------------------------------------------------------------------------
-ACCOUNT_INVENTORY = "130000"  # Inventory - raw materials (asset)
-ACCOUNT_GR_IR_CLEARING = "191100"  # Goods received / invoice received (liability)
-ACCOUNT_CONSUMPTION = "510000"  # Raw material consumption (expense)
-ACCOUNT_INVENTORY_REVALUATION = "231000"  # Standard cost revaluation / price difference
+# Account numbers come from the declared chart of accounts (BTB-35), not from
+# literals here. They used to be four constants whose type lived in a trailing
+# comment, so nothing could ask whether a posting was to an asset or an
+# expense -- a balance sheet and an income statement could not be separated,
+# and `debit_credit_indicator` could not be checked against what the account
+# normally does.
+ACCOUNT_INVENTORY = accounts.INVENTORY_RAW.number
+ACCOUNT_GR_IR_CLEARING = accounts.GR_IR_CLEARING.number
+#: Where a component issue lands. ADR-028 moves this from an expense account to
+#: work in process: issuing a component to an order capitalises it, it does not
+#: consume it. The name is kept for now and the chain lands with the WIP work.
+ACCOUNT_CONSUMPTION = accounts.COST_OF_GOODS_SOLD.number
+ACCOUNT_INVENTORY_REVALUATION = accounts.PRICE_DIFFERENCE.number
+#: Offsets opening stock. A real opening balance comes from the prior period's
+#: closing balance sheet; with no prior period in the data, the counter-entry
+#: goes to retained earnings so the opening trial balance still nets to zero.
+ACCOUNT_OPENING_BALANCE = accounts.OPENING_BALANCE.number
 
 # SAP debit/credit indicators.
 DEBIT = "S"
@@ -210,6 +248,11 @@ EXTRACT_SPECS: dict[str, ExtractSpec] = {
             "document_date",
             "po_number",
             "po_item",
+            # The production order an issue was consumed by (ADR-027). Null on
+            # receipts, which come from a purchase order instead -- the two
+            # references are mutually exclusive, and a movement with neither
+            # is one nobody can attribute.
+            "order_number",
             "entered_by",
             # Stamped by the shipment generator after the movements exist
             # (ADR-026). Declared here because the writer rejects a column it
@@ -323,6 +366,56 @@ def _period_bounds(profile: Profile) -> tuple[dt.date, dt.date]:
     return profile.period_start, ends[-1]
 
 
+class InsufficientStockError(Exception):
+    """Production consumed more of a material than was ever received."""
+
+
+def assert_on_hand_never_negative(movements: Sequence[dict[str, Any]]) -> None:
+    """Walk the movements in posting order and refuse a negative balance.
+
+    Checked rather than clamped. Issue quantities come from the bill of
+    materials times the order quantity (ADR-027), so they are demand, not a
+    free variable -- clamping them to available stock would silently build
+    fewer racks than the production orders say were built, and MES, the
+    confirmations and the GL would then disagree with the material ledger.
+
+    A profile whose production outruns its purchasing is a configuration fault.
+    It should stop the run and name the material, not produce a dataset whose
+    inventory is impossible. Before ADR-027 it did neither: consumption was not
+    in the ledger at all, so 58 times more material was consumed than received
+    and every control passed.
+
+    Raises:
+        InsufficientStockError: naming the material, the date and the shortfall.
+    """
+    on_hand: dict[str, int] = {}
+    for movement in sorted(movements, key=lambda m: (m["posting_date"], m["movement_type"])):
+        material = movement["material_number"]
+        # Quantities are already signed by movement type: receipts positive,
+        # issues negative.
+        on_hand[material] = on_hand.get(material, 0) + int(movement["quantity"])
+        if on_hand[material] < 0:
+            raise InsufficientStockError(
+                f"{material} went to {on_hand[material]} on {movement['posting_date']} "
+                f"(document {movement['material_document']}/"
+                f"{movement['material_document_item']}). Production consumed more than "
+                f"purchasing received: raise the profile's purchase_order_lines, or "
+                f"lower its production volume."
+            )
+
+
+def _lines_for(units: int, total_lines: int) -> int:
+    """How many purchase order lines one material's demand is spread over.
+
+    Real purchasing splits a year's demand across repeat orders rather than one
+    enormous line, and the three-way match needs several lines per material to
+    be worth running at all. Two is a floor, not a target: a material with
+    little demand still gets ordered more than once.
+    """
+    del units  # Shape, not volume: every material is spread the same way.
+    return max(2, total_lines // 40)
+
+
 class InventoryGenerator:
     """Deterministic generator for the inventory slice.
 
@@ -335,6 +428,13 @@ class InventoryGenerator:
         self.config = config
         self.profile = config.profile(profile_name)
         self.rng = np.random.default_rng(config.seed)
+        # Memoised masters. See `materials` for the fault this prevents.
+        self._materials_cache: list[dict[str, Any]] | None = None
+        self._suppliers_cache: list[dict[str, Any]] | None = None
+        self._costs_cache: (
+            tuple[list[dict[str, Any]], dict[str, list[tuple[dt.date, dt.date, decimal.Decimal]]]]
+            | None
+        ) = None
         self.start, self.end = _period_bounds(self.profile)
         self.month_ends = _month_ends(self.profile.period_start, self.profile.months)
 
@@ -358,6 +458,26 @@ class InventoryGenerator:
             return first
         return first + dt.timedelta(days=int(self.rng.integers(0, span + 1)))
 
+    def clerk(self) -> str:
+        """A warehouse clerk, from the same pool the movements already use.
+
+        Public so the production-costing module can stamp its movements with a
+        clerk from the same set rather than inventing a second pool -- two
+        pools would make `entered_by` meaningless as a segregation-of-duties
+        signal (CTRL-012).
+        """
+        return str(self._choice(_CLERKS))
+
+    def next_material_document(self, fiscal_year: int) -> str:
+        """The next material document number for a fiscal year.
+
+        Public for the same reason as `clerk`: finished goods receipts and
+        dispatches are material documents and must come from the same number
+        range, or the natural key could collide across two ranges that each
+        think they own it.
+        """
+        return self._md_range(fiscal_year).next()
+
     def _md_range(self, year: int) -> ids.NumberRange:
         if year not in self._md_numbers:
             self._md_numbers[year] = ids.material_document_numbers()
@@ -375,6 +495,20 @@ class InventoryGenerator:
 
     # -- master data ------------------------------------------------------
     def materials(self) -> list[dict[str, Any]]:
+        """The material master. Memoised, so calling it twice is harmless.
+
+        Not an optimisation. ADR-027 made `dataset.build` ask for the materials
+        up front, to build the bill of materials, before calling `generate()`
+        -- which asked for them again. Each call drew from the shared
+        generator, so the second returned a *different* material master: the
+        BOM referenced materials the cost windows had never heard of, and
+        generation died on a KeyError for material 1000007.
+
+        Memoising makes the method idempotent, which is the property the
+        caller reasonably assumed it already had.
+        """
+        if self._materials_cache is not None:
+            return self._materials_cache
         groups = list(self.config.domain["material_groups"])
         rows: list[dict[str, Any]] = []
         created_floor = self.start - dt.timedelta(days=720)
@@ -391,9 +525,13 @@ class InventoryGenerator:
                     "created_on": self._date_between(created_floor, self.start),
                 }
             )
+        self._materials_cache = rows
         return rows
 
     def suppliers(self) -> list[dict[str, Any]]:
+        """The vendor master. Memoised for the same reason as `materials`."""
+        if self._suppliers_cache is not None:
+            return self._suppliers_cache
         created_floor = self.start - dt.timedelta(days=1460)
         rows: list[dict[str, Any]] = []
         for index in range(self.profile.suppliers):
@@ -408,22 +546,34 @@ class InventoryGenerator:
                     "created_on": self._date_between(created_floor, self.start),
                 }
             )
+        self._suppliers_cache = rows
         return rows
 
     def standard_costs(
         self, materials: Sequence[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], dict[str, list[tuple[dt.date, dt.date, decimal.Decimal]]]]:
-        """Effective-dated standard costs.
+        """Effective-dated standard costs. Memoised, like the other masters.
 
         Roughly one material in six gets a mid-period change, so the as-of join
         and the Phase 3 SCD Type 2 snapshot have something real to reproduce. A
         material with a single cost for the whole window would make an as-of
         bug invisible.
 
+        Memoised for the reason `materials` is, and it mattered here: after
+        ADR-027 moved procurement to the end of the run, the costs were being
+        drawn *after* the bill of materials and the production orders had taken
+        their own draws, so a cost window generated inside a full build
+        differed from the same window generated alone -- material 1000000 came
+        out at 21,358.00 in one and 32,396.00 in the other. The masters have to
+        be drawn before anything downstream exists, or every published figure
+        moves whenever a later generator changes how much randomness it uses.
+
         Returns:
             The extract rows, and a lookup of
             ``material_number -> [(valid_from, valid_to, cost)]`` for valuation.
         """
+        if self._costs_cache is not None:
+            return self._costs_cache
         far_future = dt.date(9999, 12, 31)
         rows: list[dict[str, Any]] = []
         lookup: dict[str, list[tuple[dt.date, dt.date, decimal.Decimal]]] = {}
@@ -486,6 +636,7 @@ class InventoryGenerator:
         # Kept so inventory_revaluations() can attribute each change to the
         # approver who authorised it -- CTRL-007 joins the two.
         self._standard_cost_rows = rows
+        self._costs_cache = (rows, lookup)
         return rows, lookup
 
     def period_close_date(self, posting_date: dt.date) -> dt.date:
@@ -528,79 +679,259 @@ class InventoryGenerator:
         self,
         materials: Sequence[dict[str, Any]],
         suppliers: Sequence[dict[str, Any]],
+        demand: dict[str, int] | None = None,
+        manufactured: frozenset[str] = frozenset(),
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Purchase order headers and lines, in SAP's header/line split.
 
         The split is the point: a count of purchase orders and a count of
         purchase order lines are different numbers, and any metric over them
         has to say which grain it means.
+
+        Lines are planned **per material and then grouped into orders**, rather
+        than orders being created first and filled with whatever material came
+        up. That inversion is what makes the material balance work (ADR-027):
+        a component cannot be issued before it is received, so each consumed
+        material needs its first delivery early, and that cannot be arranged
+        when the material is a random draw inside an order that already has a
+        date.
+
+        It failed twice before this. With quantities sized to demand but dates
+        left random, material 1000007 still went to -444 on day one; adding a
+        three-week production ramp moved the failure to day twenty-one and no
+        further, because that material's first receipt simply landed later than
+        that.
         """
         target_lines = self.profile.purchase_order_lines
-        headers: list[dict[str, Any]] = []
-        lines: list[dict[str, Any]] = []
+        demand = demand or {}
+
+        # Quantities are sized to cover what production will consume, plus the
+        # stock the business keeps on hand (ADR-027). Before this, quantities
+        # were drawn from randint(2, 41) with no reference to demand, and
+        # production consumed 58 times what was ever received -- physically
+        # impossible, and invisible because nothing joined the two.
+        #
+        # Derived rather than configured as a multiplier: a multiplier has to
+        # be re-tuned whenever the bill of materials or the order quantity
+        # changes, and nothing would notice when it went stale. This cannot go
+        # stale -- it is computed from the demand it has to cover.
+        retention = float(self.config.domain["inventory_retention"])
+        # Receipts must exceed consumption, because a share is held as stock
+        # rather than issued. Dividing by (1 - retention) is that gross-up.
+        cover = 1.0 / max(0.05, 1.0 - retention)
+        # Not every ordered line is delivered -- 12% never arrive inside the
+        # window and some arrive short -- so order more than is needed.
+        delivery_shortfall = 1.0 / 0.80
 
         # Order window stops short of period end so deliveries land inside it.
         order_last = self.end - dt.timedelta(days=20)
+        lines_per_material = max(2, target_lines // max(1, 40))
 
-        while len(lines) < target_lines:
+        price_of = {
+            m["material_number"]: MATERIAL_GROUP_PRICE_BANDS[m["material_group"]] for m in materials
+        }
+
+        # --- plan the lines, material by material ---
+        planned: list[dict[str, Any]] = []
+        for material_number in sorted(demand):
+            if material_number not in price_of:
+                continue
+            units = int(demand[material_number] * cover * delivery_shortfall)
+            count = lines_per_material
+            per_line = max(1, units // count)
+
+            for index in range(count):
+                if index == 0:
+                    # The opening delivery. Ordered on day one with the
+                    # shortest lead time, and larger, because it has to carry
+                    # production through the ramp until the next delivery of
+                    # this material arrives.
+                    po_date = self.start
+                    delivery = po_date + dt.timedelta(days=int(self.rng.integers(5, 11)))
+                    quantity = max(1, int(per_line * 2.5))
+                else:
+                    po_date = self._date_between(self.start, order_last)
+                    delivery = self._date_between(
+                        po_date + dt.timedelta(days=7),
+                        min(po_date + dt.timedelta(days=45), self.end),
+                    )
+                    # Spread around the target so lines are not identical: a
+                    # three-way match where every line carries the same
+                    # quantity cannot show a short delivery as distinctive.
+                    quantity = max(
+                        1, int(self.rng.integers(int(per_line * 0.7), int(per_line * 1.3) + 1))
+                    )
+                planned.append(
+                    {
+                        "material_number": material_number,
+                        "quantity_ordered": quantity,
+                        "po_date": po_date,
+                        "delivery_date": delivery,
+                    }
+                )
+
+        # --- fill the rest with other bought materials ---
+        # Anything not on a released bill of materials, bought in small
+        # quantities so the purchasing data is not limited to what the factory
+        # happens to build.
+        #
+        # MANUFACTURED materials are excluded: you do not buy what you build.
+        # They used to land here, because a rack is not a component so it never
+        # appeared in demand -- and once BTB-35 rolled up their standard costs,
+        # 119 lines were buying racks and trays for $17.0M at purchase prices
+        # while the same receipts were valued at standard cost for $1.25B. The
+        # supplier would be owed one figure and inventory would carry a figure
+        # 73 times larger, with the difference sitting in GR/IR.
+        other = [
+            m["material_number"]
+            for m in materials
+            if m["material_number"] not in demand and m["material_number"] not in manufactured
+        ]
+        # Falls back to demand materials once the others run out, rather than
+        # ending up with fewer purchase order lines than the profile declares:
+        # a component is bought repeatedly, which is realistic anyway.
+        fill_pool = other or [m for m in materials if m["material_number"] in demand]
+        while len(planned) < target_lines and fill_pool:
+            material_number = fill_pool[int(self.rng.integers(0, len(fill_pool)))]
+            po_date = self._date_between(self.start, order_last)
+            planned.append(
+                {
+                    "material_number": material_number,
+                    "quantity_ordered": int(self.rng.integers(2, 41)),
+                    "po_date": po_date,
+                    "delivery_date": self._date_between(
+                        po_date + dt.timedelta(days=7),
+                        min(po_date + dt.timedelta(days=45), self.end),
+                    ),
+                }
+            )
+
+        # --- group the planned lines into purchase orders ---
+        # Sorted by order date, so purchase order numbers rise with it as a
+        # real number range does. Lines sharing a date go on one order, which
+        # keeps the header and line grains genuinely different.
+        planned.sort(key=lambda row: (row["po_date"], row["material_number"]))
+
+        headers: list[dict[str, Any]] = []
+        lines: list[dict[str, Any]] = []
+        position = 0
+        while position < len(planned):
+            chunk = planned[position : position + int(self.rng.integers(1, 5))]
+            position += len(chunk)
+
             po_number = self._po_numbers.next()
             supplier = self._choice(suppliers)
-            po_date = self._date_between(self.start, order_last)
-
-            line_count = min(int(self.rng.integers(1, 5)), target_lines - len(lines))
             headers.append(
                 {
                     "po_number": po_number,
                     "supplier_number": supplier["supplier_number"],
-                    "po_date": po_date,
+                    "po_date": chunk[0]["po_date"],
                     "currency": CURRENCY,
                     "created_by": self._choice(_BUYERS),
                     "company_code": COMPANY_CODE,
                 }
             )
-
-            for item in ids.line_items(line_count):
-                material = self._choice(materials)
-                low, high = MATERIAL_GROUP_PRICE_BANDS[material["material_group"]]
-                quantity = int(self.rng.integers(2, 41))
+            for item, row in zip(ids.line_items(len(chunk)), chunk, strict=True):
+                low, high = price_of[row["material_number"]]
                 unit_price = money(D(int(self.rng.integers(low, high + 1))))
                 lines.append(
                     {
                         "po_number": po_number,
                         "po_item": item,
-                        "material_number": material["material_number"],
-                        "quantity_ordered": quantity,
+                        "material_number": row["material_number"],
+                        "quantity_ordered": row["quantity_ordered"],
                         "unit_price_usd": unit_price,
-                        "net_value_usd": money(unit_price * quantity),
+                        "net_value_usd": money(unit_price * row["quantity_ordered"]),
                         "uom": self.config.domain["uom_default"],
-                        "delivery_date": self._date_between(
-                            po_date + dt.timedelta(days=7),
-                            min(po_date + dt.timedelta(days=45), self.end),
-                        ),
+                        "delivery_date": row["delivery_date"],
                         "plant": PLANT,
                     }
                 )
 
         return headers, lines
 
+    def opening_stock(
+        self,
+        receipts: Sequence[dict[str, Any]],
+        issues: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Stock the business already held when the window opened.
+
+        Sized to the shortfall each material actually runs, by walking the
+        receipts and issues in posting order and recording the most negative
+        balance reached. Computed rather than configured: a constant would have
+        to be re-tuned whenever the bill of materials, the order quantity or
+        the purchase plan changed, and nothing would notice when it went stale.
+
+        No randomness, so it stays deterministic.
+
+        A margin is added on top of the bare shortfall. Without it the balance
+        would touch exactly zero at the worst moment, leaving nothing on hand
+        -- and a material at zero is one rounding difference away from the
+        negative balance CTRL-010 exists to catch.
+        """
+        timeline: list[tuple[dt.date, int, str]] = [
+            (r["posting_date"], int(r["quantity"]), r["material_number"]) for r in receipts
+        ]
+        timeline += [(i["posting_date"], -int(i["quantity"]), i["material_number"]) for i in issues]
+        # Issues before receipts on the same date, so same-day sequencing is
+        # judged at its worst rather than its most convenient.
+        timeline.sort(key=lambda row: (row[0], row[1]))
+
+        balance: dict[str, int] = {}
+        worst: dict[str, int] = {}
+        for _posting_date, delta, material_number in timeline:
+            running = balance.get(material_number, 0) + delta
+            balance[material_number] = running
+            if running < worst.get(material_number, 0):
+                worst[material_number] = running
+
+        rows: list[dict[str, Any]] = []
+        for material_number in sorted(worst):
+            shortfall = -worst[material_number]
+            if shortfall <= 0:
+                continue
+            rows.append(
+                {
+                    "material_number": material_number,
+                    # A tenth over the shortfall, and never less than one unit.
+                    "quantity": max(1, int(shortfall * 1.10)),
+                    "posting_date": self.start,
+                    "document_date": self.start,
+                }
+            )
+        return rows
+
     # -- goods movements --------------------------------------------------
     def goods_movements(
         self,
         po_lines: Sequence[dict[str, Any]],
         cost_lookup: dict[str, list[tuple[dt.date, dt.date, decimal.Decimal]]],
+        consumption: Sequence[dict[str, Any]] = (),
     ) -> list[dict[str, Any]]:
-        """Goods receipts against PO lines, then issues that never oversell.
+        """Goods receipts against purchase order lines, and the issues
+        production consumed.
 
-        Receipts come first and are grouped into material documents by
-        (PO, posting date), so a document can carry several items. That matters
-        for the grain story: with one item per document, "one row per material
-        document" and "one row per material document line" would be the same
-        number and `fct_goods_movements`'s declared grain would prove nothing.
+        Receipts are grouped into material documents by (PO, posting date), so
+        a document can carry several items. That matters for the grain story:
+        with one item per document, "one row per material document" and "one
+        row per material document line" would be the same number and
+        `fct_goods_movements`'s declared grain would prove nothing.
 
-        Issues are generated by walking each material's receipts in posting
-        order and consuming only what is on hand at that point, so on-hand
-        cannot go negative. Phase 2's `negative_on_hand` defect works by
-        deliberately breaking that ordering.
+        Issues come from `component_consumption` (ADR-027) rather than being
+        invented from a ratio, so the quantity ledger, the production story and
+        the GL describe the same physical events. On-hand is *checked* rather
+        than *clamped*: demand is fixed by the bill of materials, so a profile
+        whose production outruns its purchasing is a configuration fault and
+        must fail loudly instead of quietly issuing stock that was never
+        bought. `assert_on_hand_never_negative` does that check.
+
+        Args:
+            po_lines: Purchase order lines to receive against.
+            cost_lookup: Effective-dated standard costs, for valuation.
+            consumption: Component consumption lines. Empty means receipts
+                only -- used when generating the procurement slice before
+                production exists.
         """
         # --- receipts, one or two per PO line (partial deliveries happen) ---
         raw_receipts: list[dict[str, Any]] = []
@@ -651,62 +982,27 @@ class InventoryGenerator:
                     }
                 )
 
-        # --- issues, bounded by on-hand at the moment of issue ---
-        by_material: dict[str, list[dict[str, Any]]] = {}
-        for receipt in raw_receipts:
-            by_material.setdefault(receipt["material_number"], []).append(receipt)
-
-        # Issue volume is derived from the number of receipts, not from the
-        # configured gl_postings figure. Deriving it from postings produced
-        # ~8.5 issues per receipt on the full profile, which drained every
-        # material to exactly zero closing stock -- arithmetically valid and
-        # commercially nonsense.
-        issues_target = int(len(raw_receipts) * float(self.config.domain["issues_per_receipt"]))
-        receipt_total = max(1, len(raw_receipts))
-
-        raw_issues: list[dict[str, Any]] = []
-        for material_number in sorted(by_material):
-            receipts = sorted(by_material[material_number], key=lambda r: r["posting_date"])
-            quota = round(issues_target * len(receipts) / receipt_total)
-            if quota <= 0:
-                continue
-
-            on_hand = 0
-            received_total = 0
-            emitted = 0
-            for index, receipt in enumerate(receipts):
-                on_hand += receipt["quantity"]
-                received_total += receipt["quantity"]
-                # Keep a floor of stock on hand. A manufacturer holds weeks of
-                # supply; without this, a long window issues everything it
-                # receives and closing inventory -- the headline KPI of this
-                # slice -- is zero.
-                floor = int(received_total * float(self.config.domain["inventory_retention"]))
-                window_end = (
-                    receipts[index + 1]["posting_date"] if index + 1 < len(receipts) else self.end
-                )
-
-                remaining_receipts = len(receipts) - index
-                share = max(1, round((quota - emitted) / max(1, remaining_receipts)))
-                for _ in range(share):
-                    if emitted >= quota or on_hand <= floor:
-                        break
-                    issuable = on_hand - floor
-                    if issuable <= 0:
-                        break
-                    ceiling = max(1, int(issuable * 0.55))
-                    quantity = int(self.rng.integers(1, ceiling + 1))
-                    posting = self._date_between(receipt["posting_date"], window_end)
-                    raw_issues.append(
-                        {
-                            "material_number": material_number,
-                            "quantity": quantity,
-                            "posting_date": posting,
-                            "document_date": posting,
-                        }
-                    )
-                    on_hand -= quantity
-                    emitted += 1
+        # --- issues: the components production actually consumed ---
+        #
+        # Derived from `component_consumption`, not invented here (ADR-027).
+        # These used to be generated from a configured ratio to receipts, with
+        # no reference to production: 17,660 units issued against 1,288,414
+        # consumed, the two sharing no key, so neither CTRL-003 nor CTRL-010
+        # could see the difference. One physical flow now.
+        #
+        # Consumption lines already carry movement type 261, a posting date and
+        # a clerk -- they were shaped like issues all along and simply never
+        # became any.
+        raw_issues: list[dict[str, Any]] = [
+            {
+                "material_number": line["component_material_number"],
+                "quantity": int(line["quantity_consumed"]),
+                "posting_date": line["posting_date"],
+                "document_date": line["posting_date"],
+                "order_number": line["order_number"],
+            }
+            for line in consumption
+        ]
 
         # --- assemble material documents ---
         # Document numbers rise with posting date, as they do in a real system.
@@ -716,12 +1012,38 @@ class InventoryGenerator:
                 receipt
             )
 
-        documents: list[tuple[dt.date, str, list[dict[str, Any]]]] = [
+        # Opening stock first, so it is on hand before anything is issued. One
+        # document for the whole entry, as an initial stock posting is.
+        opening = self.opening_stock(raw_receipts, raw_issues)
+
+        documents: list[tuple[dt.date, str, list[dict[str, Any]]]] = []
+        if opening:
+            documents.append((self.start, MVT_INITIAL_STOCK, opening))
+        documents += [
             (posting_date, MVT_GOODS_RECEIPT, items)
             for (_po, posting_date), items in receipt_groups.items()
         ]
-        documents.extend((issue["posting_date"], MVT_GOODS_ISSUE, [issue]) for issue in raw_issues)
-        documents.sort(key=lambda entry: (entry[0], entry[1]))
+
+        # Issues group by (order, posting date), the way receipts group by
+        # (purchase order, posting date): a shop floor issuing eleven
+        # components to one order on one day raises one material document, not
+        # eleven. One document per issue would also make the issue side's
+        # document and line counts identical, so the grain story would hold on
+        # the receipt side only.
+        issue_groups: dict[tuple[str, dt.date], list[dict[str, Any]]] = {}
+        for issue in raw_issues:
+            issue_groups.setdefault((issue["order_number"], issue["posting_date"]), []).append(
+                issue
+            )
+        documents.extend(
+            (posting_date, MVT_GOODS_ISSUE, items)
+            for (_order, posting_date), items in issue_groups.items()
+        )
+        # By date, then movement type: '101' < '261' < '561' as strings, which
+        # would put the opening entry last on its own date. Initial stock has
+        # to be numbered and posted before anything draws on it, so it sorts
+        # first explicitly rather than by accident of string order.
+        documents.sort(key=lambda entry: (entry[0], entry[1] != MVT_INITIAL_STOCK, entry[1]))
 
         rows: list[dict[str, Any]] = []
         for posting_date, movement_type, items in documents:
@@ -748,6 +1070,12 @@ class InventoryGenerator:
                         "document_date": item["document_date"],
                         "po_number": item.get("po_number"),
                         "po_item": item.get("po_item"),
+                        # Exactly one of po_number / order_number is set: a
+                        # receipt comes from a purchase order, an issue goes to
+                        # a production order. A movement with neither is one
+                        # nobody can attribute, which is what every issue was
+                        # before ADR-027.
+                        "order_number": item.get("order_number"),
                         "entered_by": self._choice(_CLERKS),
                         # Stamped later by the shipment generator, which only
                         # exists once the receipts do (ADR-026). Emitted as
@@ -851,13 +1179,30 @@ class InventoryGenerator:
         self,
         movements: Sequence[dict[str, Any]],
         revaluations: Sequence[dict[str, Any]] = (),
+        order_costings: Sequence[Any] = (),
     ) -> list[dict[str, Any]]:
-        """One accounting document per material document, two lines per item.
+        """One accounting document per material document, two lines per item,
+        plus the value-only entries that no material document causes.
 
-        A goods receipt debits inventory and credits the GR/IR clearing
-        account. A goods issue credits inventory and debits consumption. Every
-        document balances to zero in signed terms, and the inventory lines sum
-        to the same figure as the movements that produced them.
+        Account determination depends on the movement type and on what the
+        movement references -- see the branch below and ADR-028. Every document
+        balances to zero in signed terms, and the stock lines sum to the same
+        figure as the movements that produced them.
+
+        Three kinds of entry have no material document behind them, because
+        nothing moved physically:
+
+        * a standard cost revaluation (ADR-023), which restates stock already
+          on hand;
+        * scrap, which writes destroyed units out of work in process;
+        * the work-in-process residual when an order closes, which becomes a
+          production variance.
+
+        Args:
+            movements: Material document lines.
+            revaluations: Standard cost revaluations.
+            order_costings: `costing.OrderCosting` per closed production order,
+                for the scrap and variance entries.
         """
         by_document: dict[tuple[str, int], list[dict[str, Any]]] = {}
         for movement in movements:
@@ -872,17 +1217,65 @@ class InventoryGenerator:
             line_item = 0
             for movement in sorted(items, key=lambda m: m["material_document_item"]):
                 amount = abs(movement["amount_usd"])
-                is_receipt = movement["movement_type"] == MVT_GOODS_RECEIPT
-                offset_account = ACCOUNT_GR_IR_CLEARING if is_receipt else ACCOUNT_CONSUMPTION
+                # Account determination (ADR-028). Which accounts a movement
+                # posts to depends on the movement type AND on what it
+                # references -- a receipt against a purchase order is a
+                # supplier liability, while a receipt against a production
+                # order is work in process becoming finished goods. SAP uses
+                # 101 for both and distinguishes them exactly this way.
+                movement_type = movement["movement_type"]
+                from_production = movement.get("order_number") is not None
+
+                if movement_type == MVT_INITIAL_STOCK:
+                    # Opening stock: no prior period to come from, so the
+                    # counter-entry is retained earnings (ADR-027).
+                    stock_account, offset_account, inbound = (
+                        ACCOUNT_INVENTORY,
+                        ACCOUNT_OPENING_BALANCE,
+                        True,
+                    )
+                elif movement_type == MVT_DISPATCH:
+                    # Finished goods leave and cost of sale is recognised. The
+                    # only place COGS is posted in this project (ADR-028).
+                    stock_account, offset_account, inbound = (
+                        accounts.FINISHED_GOODS.number,
+                        accounts.COST_OF_GOODS_SOLD.number,
+                        False,
+                    )
+                elif movement_type == MVT_GOODS_RECEIPT and from_production:
+                    # Confirmed output: work in process becomes product.
+                    stock_account, offset_account, inbound = (
+                        accounts.FINISHED_GOODS.number,
+                        accounts.WORK_IN_PROCESS.number,
+                        True,
+                    )
+                elif movement_type == MVT_GOODS_RECEIPT:
+                    stock_account, offset_account, inbound = (
+                        ACCOUNT_INVENTORY,
+                        ACCOUNT_GR_IR_CLEARING,
+                        True,
+                    )
+                else:
+                    # A component issued to an order CAPITALISES into work in
+                    # process; it is not consumed. Posting it to an expense
+                    # account -- which is what this did before ADR-028 -- states
+                    # that the money has left the business when it has only
+                    # moved along the floor.
+                    stock_account, offset_account, inbound = (
+                        ACCOUNT_INVENTORY,
+                        accounts.WORK_IN_PROCESS.number,
+                        False,
+                    )
+                is_inbound = inbound
 
                 # Inventory line, then its offset.
                 pairs = [
                     (
-                        ACCOUNT_INVENTORY,
-                        DEBIT if is_receipt else CREDIT,
+                        stock_account,
+                        DEBIT if is_inbound else CREDIT,
                         movement["material_number"],
                     ),
-                    (offset_account, CREDIT if is_receipt else DEBIT, None),
+                    (offset_account, CREDIT if is_inbound else DEBIT, None),
                 ]
                 for account, indicator, material_number in pairs:
                     line_item += 1
@@ -950,11 +1343,74 @@ class InventoryGenerator:
                         "entered_by": "MLEDGER",
                     }
                 )
+
+        # --- scrap and the work-in-process residual (ADR-028) ---
+        #
+        # Value-only: a scrapped unit is destroyed rather than moved, and a
+        # residual is an arithmetic fact about an order rather than an event.
+        # Both relieve work in process, which is what makes the account empty
+        # as orders close instead of growing without limit.
+        for order_costing in order_costings:
+            posting_date = order_costing.posting_date
+            fiscal_year = posting_date.year
+
+            for amount, expense_account, reference in (
+                (order_costing.scrapped, accounts.SCRAP_EXPENSE.number, "SCRAP"),
+                (order_costing.variance, accounts.PRODUCTION_VARIANCE.number, "VARIANCE"),
+            ):
+                if amount == 0:
+                    # No entry rather than a zero-value document. A document
+                    # that posts nothing is noise in the ledger and would make
+                    # the document count meaningless as a measure of activity.
+                    continue
+
+                accounting_document = self._ad_range(fiscal_year).next()
+                magnitude = abs(amount)
+                # A positive residual means the order absorbed more than it
+                # relieved, so the expense is debited and work in process is
+                # credited down. A negative one reverses both.
+                debit_expense = amount > 0
+                pairs = [
+                    (expense_account, DEBIT if debit_expense else CREDIT, None),
+                    (
+                        accounts.WORK_IN_PROCESS.number,
+                        CREDIT if debit_expense else DEBIT,
+                        None,
+                    ),
+                ]
+                for line_item, (account, indicator, material_number) in enumerate(pairs, start=1):
+                    rows.append(
+                        {
+                            "accounting_document": accounting_document,
+                            "line_item": line_item,
+                            "fiscal_year": fiscal_year,
+                            "company_code": COMPANY_CODE,
+                            "gl_account": account,
+                            "debit_credit_indicator": indicator,
+                            "amount_usd": magnitude,
+                            "signed_amount_usd": (
+                                magnitude if indicator == DEBIT else money(-magnitude)
+                            ),
+                            "currency": CURRENCY,
+                            "posting_date": posting_date,
+                            "document_date": posting_date,
+                            "entered_on": posting_date,
+                            # The order, so a reviewer can trace the entry to
+                            # the production it came from.
+                            "reference_document": f"{reference}-{order_costing.order_number}",
+                            "material_number": material_number,
+                            "entered_by": "COSTING",
+                        }
+                    )
         return rows
 
     # -- defect injection -------------------------------------------------
     def inject_defects(
-        self, data: InventoryData, enabled: Sequence[str]
+        self,
+        data: InventoryData | None = None,
+        enabled: Sequence[str] = (),
+        movements: list[dict[str, Any]] | None = None,
+        postings: list[dict[str, Any]] | None = None,
     ) -> list[defects.InjectedRecord]:
         """Plant the requested defects and return what was planted.
 
@@ -966,7 +1422,30 @@ class InventoryGenerator:
         An unimplemented defect raises rather than being skipped: silently
         ignoring a requested defect would make a detection test pass with
         nothing planted.
+
+        Args:
+            data: An `InventoryData` whose movements and postings are the final
+                ones. Convenient when the slice is generated in one pass.
+            enabled: Defect keys to plant.
+            movements: Final movement rows, when they are not the slice's own.
+            postings: Final posting rows, likewise.
+
+        `movements` and `postings` exist because the ledger became a deferred
+        extract (ADR-028): finished goods receipts cannot be generated until
+        MES has recorded the outcome, so the postings are built at write time
+        from movements that did not exist when the inventory slice was made.
+        Planting into the slice's own lists then plants into data nobody
+        writes -- which is exactly what happened to `backdated_gl_posting`
+        until this signature changed, and the defect silently vanished.
         """
+        if movements is None:
+            if data is None:
+                raise ValueError("pass either data or both movements and postings")
+            movements = data.goods_movements
+        if postings is None:
+            if data is None:
+                raise ValueError("pass either data or both movements and postings")
+            postings = data.gl_postings
         planted: list[defects.InjectedRecord] = []
         for key in defects.REGISTRY:
             if key not in enabled:
@@ -976,11 +1455,11 @@ class InventoryGenerator:
             count = int(spec.get("count", 1))
 
             if key == "duplicate_goods_receipt":
-                planted.extend(injector(data.goods_movements, data.gl_postings, count, self.rng))
+                planted.extend(injector(movements, postings, count, self.rng))
             elif key == "backdated_gl_posting":
                 planted.extend(
                     injector(
-                        data.gl_postings,
+                        postings,
                         count,
                         self.period_close_date,
                         lambda year: self._ad_range(year).next(),
@@ -994,13 +1473,33 @@ class InventoryGenerator:
         return planted
 
     # -- orchestration ----------------------------------------------------
-    def generate(self) -> InventoryData:
-        """Generate every inventory extract, in a fixed order."""
+    def generate(
+        self,
+        demand: dict[str, int] | None = None,
+        consumption: Sequence[dict[str, Any]] = (),
+        manufactured: frozenset[str] = frozenset(),
+    ) -> InventoryData:
+        """Generate every inventory extract, in a fixed order.
+
+        Args:
+            demand: Material -> units production will consume, so purchase
+                quantities cover it (ADR-027). None buys the small baseline
+                quantities, which is only right when nothing is produced.
+            consumption: Component consumption lines, which become the goods
+                issues. Empty means receipts only.
+
+        The caller supplies both because they come from the bill of materials
+        and the production orders, which are generated after the material
+        master this object produces. `dataset.build` sequences that: masters,
+        then BOM, then production, then back here for procurement and
+        movements. Inventory and production are no longer independent slices,
+        and that is the point of ADR-027 -- they describe one physical flow.
+        """
         materials = self.materials()
         suppliers = self.suppliers()
         standard_costs, cost_lookup = self.standard_costs(materials)
-        headers, lines = self.purchase_orders(materials, suppliers)
-        movements = self.goods_movements(lines, cost_lookup)
+        headers, lines = self.purchase_orders(materials, suppliers, demand, manufactured)
+        movements = self.goods_movements(lines, cost_lookup, consumption)
         revaluations = self.inventory_revaluations(movements, cost_lookup)
         postings = self.gl_postings(movements, revaluations)
         return InventoryData(

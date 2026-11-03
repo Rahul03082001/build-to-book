@@ -331,3 +331,75 @@ def test_the_command_it_prints_plants_only_the_chosen_defect(
     # wrong in the other direction.
     data_target = makefile.split("\ndata:", 1)[1].split("\n.PHONY", 1)[0]
     assert "DEFECTS" in data_target, "make data no longer forwards DEFECTS"
+
+
+def test_the_demo_profile_implies_a_plausible_business(
+    cfg: genconfig.GeneratorConfig,
+) -> None:
+    """The declared volumes must describe a company that could exist.
+
+    `mes_events` sets the order quantity, which sets how many racks are built,
+    which sets how much material is bought. Those four numbers were never
+    checked against each other for plausibility, and at 60,000 declared events
+    the demo profile implied 14,800 racks a quarter -- about $60B a year of
+    component purchasing, which is four times Supermicro's revenue. The figure
+    only became visible when ADR-027 made purchasing cover consumption; before
+    that, production volume had no monetary consequence at all.
+
+    The band is wide on purpose. This is not a test of a target number, it is a
+    guard against a profile that silently stops describing a manufacturer --
+    the specific failure being that nothing connected the MES event count to
+    the money.
+    """
+    from generator import mes
+
+    profile = cfg.profile("demo")
+    steps = cfg.domain["mes_steps"]
+    units_per_order = mes.order_quantity_for_profile(
+        declared_events=profile.mes_events,
+        order_count=profile.production_orders,
+        step_count=len(steps),
+        max_rework_attempts=int(cfg.domain["max_rework_attempts"]),
+        step_failure_rates=[float(s.get("failure_rate", 0.0)) for s in steps],
+    )
+    racks_per_window = units_per_order * profile.production_orders
+    windows_per_year = 12 / profile.months
+    racks_per_year = racks_per_window * windows_per_year
+
+    # Measured from the generated data: the standard cost of the components in
+    # one rack. Stated here rather than recomputed, because the point is the
+    # order of magnitude and a drifting rack cost should move this test's
+    # message rather than quietly keep it passing.
+    rack_component_cost = 1_013_063
+    implied_annual = racks_per_year * rack_component_cost
+
+    assert 1e9 <= implied_annual <= 2e10, (
+        f"the demo profile implies {racks_per_year:,.0f} racks a year at "
+        f"${rack_component_cost:,} each -- ${implied_annual / 1e9:,.1f}B of annual "
+        "component purchasing, which is not a manufacturer anyone would recognise. "
+        "mes_events drives the order quantity, which drives the money."
+    )
+
+
+def test_the_full_profile_is_a_volume_profile_not_a_business(
+    cfg: genconfig.GeneratorConfig,
+) -> None:
+    """And the full profile is deliberately NOT plausible, which must be said.
+
+    5,000,000 MES events divided by roughly four events per unit is about 1.2
+    million racks, and at a million dollars a rack that is over a trillion
+    dollars a quarter. No arrangement of orders changes that: the event count
+    and the unit cost are what they are.
+
+    The profile exists to prove the pipeline handles five million rows (ADR-016,
+    ADR-024), not to describe a company. This test exists so that fact is
+    asserted rather than assumed, and so nobody quotes a monetary total from a
+    `full` run as a business figure.
+    """
+    profile = cfg.profile("full")
+    assert profile.mes_events >= 5_000_000
+    assert "performance" in profile.description.lower() or "tuning" in profile.description.lower()
+    assert "not" in profile.description.lower(), (
+        "the full profile's description must say what it is not, or its "
+        "monetary totals will be read as business facts"
+    )

@@ -42,6 +42,14 @@ ORDER_STATUS_TECHNICALLY_COMPLETE = "TECO"
 #: Movement type for a goods issue to a production order (ADR-002).
 MVT_ISSUE_TO_ORDER = "261"
 
+#: Days into the reporting window before the first production order starts.
+#:
+#: Components must be received before they can be issued to an order, and the
+#: shortest purchase lead time is seven days (see `purchase_orders`). Three
+#: weeks gives early orders stock to draw on without idling a month of a
+#: three-month window.
+PRODUCTION_RAMP_DAYS = 21
+
 #: Days from order start to finish. A rack passes through assembly, firmware,
 #: a twelve-hour burn-in and final test, so a few days is realistic.
 ORDER_DURATION_DAYS = (3, 12)
@@ -205,6 +213,21 @@ class ProductionGenerator:
         # its MES events in the reporting period.
         last_start = self.period_end - dt.timedelta(days=max(ORDER_DURATION_DAYS))
 
+        # Production starts after a ramp, because components have to arrive
+        # before they can be issued (ADR-027). Orders used to start on day one
+        # of the window and consume immediately, while the earliest purchase
+        # receipt could not land for a week -- an order consumed 444 units of a
+        # component on 2026-08-01 against an on-hand balance of zero.
+        #
+        # That was invisible until the issues became real movements: with
+        # consumption outside the material ledger, nothing compared the two.
+        first_start = self.period_start + dt.timedelta(days=PRODUCTION_RAMP_DAYS)
+        if first_start >= last_start:
+            # A window too short to ramp. Keep the original behaviour rather
+            # than producing no orders at all, and let the on-hand guard in
+            # dataset.build decide whether the result is usable.
+            first_start = self.period_start
+
         for _ in range(self.order_count):
             rack = self.racks[int(self.rng.integers(0, len(self.racks)))]
             requirements = self._requirements.get(rack, {})
@@ -212,8 +235,8 @@ class ProductionGenerator:
                 continue
 
             order_number = self._numbers.next()
-            span = max((last_start - self.period_start).days, 1)
-            start = self.period_start + dt.timedelta(days=int(self.rng.integers(0, span)))
+            span = max((last_start - first_start).days, 1)
+            start = first_start + dt.timedelta(days=int(self.rng.integers(0, span)))
             duration = int(self.rng.integers(*ORDER_DURATION_DAYS))
             finish = min(start + dt.timedelta(days=duration), self.period_end)
             target = int(self.rng.integers(1, 9))

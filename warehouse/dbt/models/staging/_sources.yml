@@ -114,7 +114,7 @@ sources:
               - not_null
               - accepted_values:
                   arguments:
-                    values: ["101", "261"]
+                    values: ["101", "261", "561", "601"]
           - name: quantity
             data_tests: [not_null]
           - name: amount_usd
@@ -128,6 +128,52 @@ sources:
               legitimate, a missing stamp would be indistinguishable from them
               -- the generator raises instead, and a dbt test asserts every
               receipt with a known purchase order names a delivery.
+
+      - name: chart_of_accounts
+        description: >
+          The chart of accounts. Master data from finance: every account the
+          postings reference, with its type and the side that normally
+          increases it (BTB-35).
+        columns:
+          - name: gl_account
+            data_tests: [unique, not_null]
+          - name: account_type
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["ASSET", "LIABILITY", "EQUITY", "EXPENSE"]
+          - name: normal_balance
+            description: DEBIT or CREDIT -- the side that increases the account.
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["DEBIT", "CREDIT"]
+          - name: is_balance_sheet
+            data_tests: [not_null]
+
+      - name: trial_balance
+        description: >
+          The monthly trial balance (ADR-029). One row per account per period,
+          with opening balance, debits, credits and closing balance. Derived by
+          finance from the same postings the warehouse loads, so a difference
+          is a real finding.
+        columns:
+          - name: gl_account
+            data_tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('raw', 'chart_of_accounts')
+                    field: gl_account
+          - name: posting_period
+            data_tests: [not_null]
+          - name: closing_balance_usd
+            description: >
+              Signed in the debit direction, so a period's closing balances
+              sum to zero across every account.
+            data_tests: [not_null]
 
       - name: shipment_headers
         description: >

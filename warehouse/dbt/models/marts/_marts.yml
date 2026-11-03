@@ -92,11 +92,22 @@ models:
         description: Part of the key -- document numbers repeat across years (ADR-020).
         data_tests: [not_null]
       - name: movement_direction
+        description: >
+          Derived from the movement type and its reference. OPENING is stock
+          the business already held when the window opened (ADR-027).
+          PRODUCTION_RECEIPT is confirmed output and DISPATCH relieves finished
+          goods (ADR-028) -- both kept separate from RECEIPT, which means a
+          purchase, so nothing counting purchasing silently includes production.
         data_tests:
           - not_null
           - accepted_values:
               arguments:
-                values: ["RECEIPT", "ISSUE"]
+                values:
+                  - RECEIPT
+                  - ISSUE
+                  - OPENING
+                  - PRODUCTION_RECEIPT
+                  - DISPATCH
       - name: material_number
         data_tests:
           - not_null

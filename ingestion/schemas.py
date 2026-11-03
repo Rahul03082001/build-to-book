@@ -31,6 +31,8 @@ import datetime as dt
 import pandera.pandas as pa
 from pandera.pandas import Column, DataFrameSchema
 
+from generator import accounts as _accounts
+
 # Plausible fiscal years. Narrow on purpose: a mis-parsed date usually lands
 # far outside this range, and catching it at load is much cheaper than
 # explaining a missing period later.
@@ -40,12 +42,21 @@ _SHA256 = r"^[0-9a-f]{64}$"
 
 # Movement types this slice knows about (ADR-002). An unknown type would get a
 # sign of zero in the mart and silently drop out of the balance.
-_MOVEMENT_TYPES = ["101", "261"]
+#: 101 goods receipt -- from a purchase order, or from a production order
+#: when it carries one; 261 issue to a production order; 561 initial stock
+#: entry (opening stock, ADR-027); 601 goods issue for delivery, which
+#: relieves finished goods and recognises cost of sale (ADR-028).
+_MOVEMENT_TYPES = ["101", "261", "561", "601"]
 
 #: Inbound delivery statuses. RECEIVED means a goods receipt exists against
 #: it; IN_TRANSIT means the shipment is still on the water at period end,
 #: which is an open commitment rather than a missing receipt (ADR-026).
 _SHIPMENT_STATUSES = ["RECEIVED", "IN_TRANSIT"]
+
+#: Account types and normal balances, from the declared chart of accounts so
+#: validation and the generator cannot disagree about what is allowed.
+_ACCOUNT_TYPES = sorted({a.account_type for a in _accounts.ACCOUNTS})
+_NORMAL_BALANCES = sorted({a.normal_balance for a in _accounts.ACCOUNTS})
 
 _DEBIT_CREDIT = ["S", "H"]
 
@@ -394,6 +405,10 @@ SCHEMAS: dict[str, DataFrameSchema] = {
             # Null on goods issues.
             "po_number": _text(nullable=True),
             "po_item": _nullable_positive_int(),
+            # The production order an issue was consumed by (ADR-027). Null on
+            # receipts; the two references are mutually exclusive and a test
+            # asserts exactly one is present per movement.
+            "order_number": _text(nullable=True),
             "entered_by": _code(),
             # The inbound delivery this receipt arrived on (ADR-026). Null on
             # issues, which have no supplier shipment, and null on a receipt
@@ -407,6 +422,37 @@ SCHEMAS: dict[str, DataFrameSchema] = {
         strict=True,
         coerce=True,
         name="goods_movements",
+    ),
+    "chart_of_accounts": DataFrameSchema(
+        {
+            "gl_account": _code(),
+            "account_name": _text(),
+            "account_type": _code(_ACCOUNT_TYPES),
+            "normal_balance": _code(_NORMAL_BALANCES),
+            "is_balance_sheet": Column(bool, coerce=True),
+            "account_purpose": _text(),
+        },
+        strict=True,
+        coerce=True,
+        name="chart_of_accounts",
+    ),
+    "trial_balance": DataFrameSchema(
+        {
+            "company_code": _code(),
+            "fiscal_year": _year(),
+            "posting_period": _code(),
+            "gl_account": _code(),
+            # Any of these may legitimately be negative: signed in the debit
+            # direction throughout, so a credit-balance account closes
+            # negative and that is correct rather than a fault.
+            "opening_balance_usd": _money(),
+            "debits_usd": _money(allow_negative=False),
+            "credits_usd": _money(allow_negative=False),
+            "closing_balance_usd": _money(),
+        },
+        strict=True,
+        coerce=True,
+        name="trial_balance",
     ),
     "shipment_headers": DataFrameSchema(
         {
@@ -527,6 +573,8 @@ NATURAL_KEYS: dict[str, tuple[str, ...]] = {
     "purchase_order_lines": ("po_number", "po_item"),
     # Material document numbers repeat across fiscal years (ADR-020).
     "goods_movements": ("material_document", "fiscal_year", "material_document_item"),
+    "chart_of_accounts": ("gl_account",),
+    "trial_balance": ("company_code", "fiscal_year", "posting_period", "gl_account"),
     "shipment_headers": ("inbound_delivery",),
     "shipment_lines": ("inbound_delivery", "shipment_item"),
     "inventory_revaluations": ("revaluation_document", "fiscal_year"),

@@ -376,30 +376,45 @@ def test_subledger_ties_to_the_gl_in_the_warehouse(
     passing through CSV, pandera coercion, COPY and numeric(18,2). A precision
     loss anywhere in that chain would make the control fail for a
     representation reason and look like a real difference.
+
+    Per inventory account, because ADR-028 put stock in three. Tying everything
+    to 130000 -- which this did -- passes while covering only raw materials,
+    since finished goods receipts and dispatches post elsewhere entirely.
     """
     with conn.cursor() as cursor:
         cursor.execute(
             """
             WITH movements AS (
-                SELECT to_char(posting_date, 'YYYY-MM') AS period, sum(amount_usd) AS amount
-                FROM raw.goods_movements GROUP BY 1
+                SELECT CASE
+                           WHEN movement_type = '601' THEN '137000'
+                           WHEN movement_type = '101' AND order_number IS NOT NULL
+                               THEN '137000'
+                           ELSE '130000'
+                       END AS account,
+                       to_char(posting_date, 'YYYY-MM') AS period,
+                       sum(amount_usd) AS amount
+                FROM raw.goods_movements GROUP BY 1, 2
             ),
             revaluations AS (
-                SELECT to_char(posting_date, 'YYYY-MM') AS period, sum(amount_usd) AS amount
-                FROM raw.inventory_revaluations GROUP BY 1
+                SELECT '130000' AS account,
+                       to_char(posting_date, 'YYYY-MM') AS period,
+                       sum(amount_usd) AS amount
+                FROM raw.inventory_revaluations GROUP BY 2
             ),
             subledger AS (
-                SELECT period, sum(amount) AS amount FROM (
+                SELECT account, period, sum(amount) AS amount FROM (
                     SELECT * FROM movements UNION ALL SELECT * FROM revaluations
-                ) combined GROUP BY 1
+                ) combined GROUP BY 1, 2
             ),
             ledger AS (
-                SELECT to_char(posting_date, 'YYYY-MM') AS period,
+                SELECT gl_account AS account,
+                       to_char(posting_date, 'YYYY-MM') AS period,
                        sum(signed_amount_usd) AS amount
-                FROM raw.gl_postings WHERE gl_account = '130000' GROUP BY 1
+                FROM raw.gl_postings
+                WHERE gl_account IN ('130000', '137000') GROUP BY 1, 2
             )
-            SELECT s.period, s.amount, l.amount, s.amount - l.amount
-            FROM subledger s FULL OUTER JOIN ledger l USING (period)
+            SELECT s.account || ' ' || s.period, s.amount, l.amount, s.amount - l.amount
+            FROM subledger s FULL OUTER JOIN ledger l USING (account, period)
             ORDER BY 1
             """
         )
@@ -442,14 +457,36 @@ def test_no_material_shows_negative_on_hand_in_the_warehouse(
 def test_every_goods_receipt_matches_a_po_line_in_the_warehouse(
     conn: psycopg.Connection, second_run: dict[str, Any]
 ) -> None:
+    """A PURCHASE receipt must name a real purchase order line.
+
+    Scoped to receipts that carry a purchase order. A receipt against a
+    PRODUCTION order is confirmed output (ADR-028) and has no purchase order
+    line by design -- SAP uses movement type 101 for both and tells them apart
+    by the reference, which is what the filter below does. Without that scope
+    this counted every finished goods receipt as an orphan.
+    """
     with conn.cursor() as cursor:
         cursor.execute(
             "SELECT count(*) FROM raw.goods_movements m "
             "LEFT JOIN raw.purchase_order_lines l "
             "  ON l.po_number = m.po_number AND l.po_item = m.po_item "
-            "WHERE m.movement_type = '101' AND l.po_number IS NULL"
+            "WHERE m.movement_type = '101' AND m.po_number IS NOT NULL "
+            "  AND l.po_number IS NULL"
         )
         assert cursor.fetchone()[0] == 0, "orphaned goods receipts in the warehouse"
+
+    # And the separation itself: a receipt carries one reference or the other,
+    # never both and never neither.
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM raw.goods_movements "
+            "WHERE movement_type = '101' "
+            "  AND (po_number IS NULL) = (order_number IS NULL)"
+        )
+        assert cursor.fetchone()[0] == 0, (
+            "a receipt carries both a purchase order and a production order, or "
+            "neither -- so nothing can attribute it"
+        )
 
 
 def test_loader_connects_as_a_role_that_cannot_read_reporting() -> None:
@@ -561,3 +598,160 @@ def test_this_module_covers_every_declared_extract() -> None:
     )
     unknown = sorted(set(LOAD_ORDER) - set(dataset.LOAD_ORDER))
     assert not unknown, f"extract(s) tested here that the generator does not produce: {unknown}"
+
+
+# ---------------------------------------------------------------------------
+# Chunked loading (BTB-36)
+#
+# Loading used to read the whole extract into one DataFrame, which peaked at
+# 4.0 GB on the full profile's 5,000,000 MES events -- almost exactly the
+# 4.3 GB ADR-024 cites for holding them as dicts. Generation streams to avoid
+# that; the loader undid the benefit one step downstream.
+#
+# Chunking introduces one genuinely new risk, and it is the subject of the
+# first test below: in-file duplicate detection must still see a duplicate
+# whose two rows land in DIFFERENT chunks. Missing it would silently turn a
+# rejected duplicate into an inserted one and leave CTRL-001 with nothing to
+# find -- so detection moved from pandas to SQL over the whole staged file.
+# ---------------------------------------------------------------------------
+def _rows(path: pathlib.Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _rewrite(path: pathlib.Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_a_duplicate_straddling_a_chunk_boundary_is_still_rejected(
+    conn: psycopg.Connection, extracts: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """The fault chunking could have introduced.
+
+    The first and last rows of the file are made identical, so with a chunk
+    size of two they cannot land in the same chunk. A per-chunk check sees each
+    once and rejects nothing.
+    """
+    from ingestion import loader as loader_module
+
+    source = extracts / "goods_movements.csv"
+    rows = _rows(source)
+    assert len(rows) > 4, "need enough rows to span several chunks"
+
+    # The duplicate: the first row repeated at the very end of the file.
+    staged = [*rows, dict(rows[0])]
+    target = tmp_path / "goods_movements.csv"
+    _rewrite(target, staged)
+
+    # A sidecar describing the file as written, so the load is not also
+    # failing a completeness check (ADR-022) and this test isolates the
+    # duplicate behaviour.
+    import json
+
+    sidecar = json.loads(
+        (extracts / "goods_movements.control_totals.json").read_text(encoding="utf-8")
+    )
+    sidecar["row_count"] = len(staged)
+    sidecar["value_total"] = str(sum(D(row[sidecar["value_column"]]) for row in staged))
+    (tmp_path / "goods_movements.control_totals.json").write_text(
+        json.dumps(sidecar), encoding="utf-8"
+    )
+
+    original_chunk = loader_module.CHUNK_ROWS
+    loader_module.CHUNK_ROWS = 2
+    try:
+        ingestion_main = __import__("ingestion.__main__", fromlist=["reset_raw"])
+        ingestion_main.reset_raw(conn, ["goods_movements"])
+        result = loader_module.load_extract(
+            conn, "goods_movements", target, loader_module.new_batch_id()
+        )
+    finally:
+        loader_module.CHUNK_ROWS = original_chunk
+
+    assert result.rows_in_file == len(staged), (
+        f"chunked read counted {result.rows_in_file} of {len(staged)} rows"
+    )
+    assert result.rows_rejected == 1, (
+        f"the duplicate was not rejected ({result.rows_rejected} rejected) -- a "
+        "per-chunk check would miss it because its two rows are in different chunks"
+    )
+    assert result.rows_inserted == len(rows), (
+        "the first occurrence must still load; only the surplus is quarantined"
+    )
+
+
+def test_the_chunk_size_does_not_change_what_is_loaded(
+    conn: psycopg.Connection, extracts: pathlib.Path
+) -> None:
+    """Reading in chunks must be invisible in the result.
+
+    Run twice at wildly different chunk sizes against a clean target, and every
+    counted figure must match. If they differed, the chunk size would be a
+    silent input to the data rather than a memory knob.
+    """
+    from ingestion import loader as loader_module
+
+    ingestion_main = __import__("ingestion.__main__", fromlist=["reset_raw"])
+    source = extracts / "goods_movements.csv"
+
+    outcomes = []
+    original = loader_module.CHUNK_ROWS
+    try:
+        for size in (3, 1_000_000):
+            loader_module.CHUNK_ROWS = size
+            ingestion_main.reset_raw(conn, ["goods_movements"])
+            result = loader_module.load_extract(
+                conn, "goods_movements", source, loader_module.new_batch_id()
+            )
+            outcomes.append(
+                (
+                    result.rows_in_file,
+                    result.rows_inserted,
+                    result.rows_rejected,
+                    result.value_total_in_file,
+                    result.file_sha256,
+                )
+            )
+    finally:
+        loader_module.CHUNK_ROWS = original
+
+    assert outcomes[0] == outcomes[1], (
+        f"chunk size changed the outcome: {outcomes[0]} at 3 rows against {outcomes[1]} in one pass"
+    )
+
+
+def test_the_value_total_is_summed_across_chunks(
+    conn: psycopg.Connection, extracts: pathlib.Path
+) -> None:
+    """The control total has to cover the whole file, not the last chunk.
+
+    It is compared against the sidecar's declared total, so a per-chunk value
+    would fail CTRL-001 for a reason that has nothing to do with the data.
+    """
+    import json
+
+    from ingestion import loader as loader_module
+
+    ingestion_main = __import__("ingestion.__main__", fromlist=["reset_raw"])
+    sidecar = json.loads(
+        (extracts / "goods_movements.control_totals.json").read_text(encoding="utf-8")
+    )
+
+    original = loader_module.CHUNK_ROWS
+    loader_module.CHUNK_ROWS = 7
+    try:
+        ingestion_main.reset_raw(conn, ["goods_movements"])
+        result = loader_module.load_extract(
+            conn, "goods_movements", extracts / "goods_movements.csv", loader_module.new_batch_id()
+        )
+    finally:
+        loader_module.CHUNK_ROWS = original
+
+    assert result.value_total_in_file == D(sidecar["value_total"]), (
+        f"summed {result.value_total_in_file} across chunks against a declared "
+        f"{sidecar['value_total']}"
+    )
+    assert result.rows_in_file == sidecar["row_count"]

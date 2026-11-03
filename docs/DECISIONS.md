@@ -44,6 +44,9 @@ SOX-style controls. Nothing here claims SOX compliance (ADR-019).
 | [ADR-024](#adr-024-keep-every-extract-as-csv-even-at-five-million-rows) | 2026-11-02 | Keep every extract as CSV, even at five million rows | Accepted |
 | [ADR-025](#adr-025-explode-the-bom-in-dbt-not-in-the-generator) | 2026-11-02 | Explode the BOM in dbt, not in the generator | Accepted |
 | [ADR-026](#adr-026-record-the-inbound-delivery-on-the-goods-receipt) | 2026-11-02 | Record the inbound delivery on the goods receipt | Accepted |
+| [ADR-027](#adr-027-one-physical-flow-of-components-issues-derive-from-consumption) | 2026-11-03 | One physical flow of components: issues derive from consumption | Accepted |
+| [ADR-028](#adr-028-recognise-cogs-at-dispatch-through-a-standard-costing-chain) | 2026-11-03 | Recognise COGS at dispatch, through a standard-costing chain | Accepted |
+| [ADR-029](#adr-029-the-trial-balance-is-a-source-extract-derived-from-the-postings) | 2026-11-03 | The trial balance is a source extract derived from the postings | Accepted |
 
 ---
 
@@ -1727,6 +1730,54 @@ depends on it.
 - Jira: BTB-33 | PR/commit: BTB-30-bom-and-streaming-writer
 - Area: Data
 
+> **Amendment 2026-11-03, measured at volume (BTB-36).** The decision below
+> stands. What it did not cover is the other end of the pipe: the writer
+> streams, and the **loader** then read each extract into a single DataFrame.
+> On the full profile's 5,000,000 MES events that peaked at **4.0 GB** --
+> almost exactly the 4.3 GB this entry cites for holding them as dicts. The
+> streaming was not wrong; it had simply been moved one step downstream, and
+> nothing measured the step it moved to.
+>
+> Loading now reads, validates and stages 100,000 rows at a time. Measured
+> like for like, both skipping all five million rows:
+>
+> | | peak RSS | elapsed |
+> |---|---|---|
+> | whole-frame read | 4.00 GB | 105.9s |
+> | chunked | 0.48 GB | 119.5s |
+>
+> Eighty-eight per cent less memory for thirteen per cent more time, which is
+> the trade this entry already argues for.
+>
+> One consequence is worth recording, because it is the part that could have
+> gone wrong silently. In-file duplicate detection used pandas over the whole
+> frame. A duplicate whose two rows fall in different chunks would be invisible
+> to a per-chunk check -- each chunk sees the key once -- so a rejected
+> duplicate would have become an inserted one and CTRL-001 would have had
+> nothing to find. Detection moved to SQL over the whole staged file, which
+> costs no memory and cannot miss a straddling pair. A test makes the first and
+> last rows of a file identical with a chunk size of two, so they cannot share
+> a chunk.
+>
+> Full pipeline at target volume, on a laptop:
+>
+> | step | elapsed | peak RSS |
+> |---|---|---|
+> | generate | 56.9s | 0.50 GB |
+> | load (5,732,890 rows) | 171.8s | 0.50 GB |
+> | dbt build (381 nodes) | 21.8s | 0.20 GB |
+> | controls (22/22) | 3.7s | 0.14 GB |
+>
+> Peak memory never exceeds 0.50 GB at any step. The resulting database is
+> 1,931 MB, which is why the hosted demo runs the `demo` profile (ADR-016) --
+> that is now a measured figure against Neon's 1 GB cap rather than an
+> assumption. The `demo` profile's own warehouse is 72-73 MB, including the
+> publish gate's retained versions and the failure-demo sandbox -- a range
+> rather than a figure, because the gate keeps two versions of each mart and
+> the total moves by about a megabyte with how many publishes a database has
+> seen. Measured twice, at 72 MB and 73 MB, which is why it is quoted as a
+> range instead of whichever number was taken last.
+
 ### Context
 
 The MES feed is the first extract where volume is a real consideration: the
@@ -1971,3 +2022,296 @@ docs/metric_definitions.md records the open questions it must answer. Tests
 assert that every receipt names a delivery, that every delivery ships before
 its receipt posts, and that shipped quantities tie to received quantities per
 delivery line.
+
+## ADR-027: One physical flow of components: issues derive from consumption
+
+- Date: 2026-11-03
+- Status: Accepted
+- Jira: BTB-35 | PR/commit: BTB-35-finance-and-trial-balance
+- Area: Data
+
+### Context
+
+Found while starting BTB-35, which asks for journal entries covering goods
+issues and production variances. The project had **two unrelated physical
+flows of the same components**, and the numbers were not close:
+
+| flow | units | posts to GL | in inventory balance |
+|---|---|---|---|
+| `component_consumption` | 1,288,414 | no | no |
+| `goods_movements` type 261 | 17,660 | yes | yes |
+
+They share no key. Production consumed 58 times more components than
+purchasing ever received (22,129 units), which is physically impossible.
+
+Nothing caught it. `component_consumption` posts nothing and is absent from
+the inventory balance, so the only two controls that could have noticed —
+CTRL-003 (subledger to GL) and CTRL-010 (no negative on-hand) — both read the
+movements, where the figure is small and self-consistent. **A reconciliation
+cannot find an error in data it does not read.**
+
+It is not a new fault. At the original order quantity of `randint(1, 9)` the
+implied consumption was roughly 174,000 units against 17,660 issued, already
+about tenfold. BTB-33 raised the demo quantity to 37 units per order so the
+generated MES event count would match the declared one, and that deepened an
+existing inconsistency to 58-fold. Fixing one declared number against reality
+exposed another that nothing was checking.
+
+Why it blocks BTB-35 rather than being a tidy-up: the story's production
+variance is actual consumption against standard absorption. Posting work in
+process from one flow and relieving it from the other would put the whole
+58-fold discrepancy into the variance account, so the headline figure the
+story exists to produce would have been a fabrication that balanced.
+
+### Options considered
+
+1. **One physical flow.** Generate the 261 issues from
+   `component_consumption`, keyed on the production order, and scale purchasing
+   so receipts cover what production consumes. The quantity ledger, the
+   production story and the GL then describe the same events. Largest change:
+   every published inventory, GL, invoice and three-way-match figure moves, and
+   CTRL-003, CTRL-004 and CTRL-010 all need re-proving.
+
+2. **Scale purchasing only**, leaving the two issue streams separate. Smaller,
+   and inventory stops being impossible. But the issues still bear no relation
+   to what production consumed, so work in process reconciles to nothing either
+   way and the variance stays meaningless. Arithmetic plausibility without
+   coherence.
+
+3. **Declare `component_consumption` a planning artefact** — the exploded BOM
+   requirement rather than a movement — and post only from the 261 issues.
+   Nothing published moves and the financial chain is buildable immediately.
+   But then no actual-versus-standard variance is computable at all, because
+   the only actual-consumption data has been declared non-physical. Criterion 1
+   would be met in name only, and the 58-fold gap would stay in the data with
+   no control over it.
+
+### Decision
+
+Option 1. `component_consumption` becomes the source of the 261 issues rather
+than a parallel account of them, `goods_movements` gains an `order_number` so
+an issue names the order it was consumed by, and purchase quantities are scaled
+so receipts cover consumption plus the configured retention.
+
+A new control reconciles the two: every component consumption line must appear
+as a goods issue, with the same quantity.
+
+### Reasons
+
+It is the only option under which the three stories the warehouse tells —
+what was bought, what was built, and what the books say — are about the same
+physical events. The others leave a reconciliation that cannot fail because
+the two sides are unrelated.
+
+It makes the variance real. Actual consumption against standard absorption is
+the metric BTB-35 exists to produce and Phase 3 reports on; it is only
+meaningful when both sides measure the same material.
+
+And it closes the gap that let this happen: there was no control tying
+production consumption to inventory issues, so the two could drift without
+limit. Adding one means the next such divergence fails a run rather than
+waiting for someone to compare two numbers by hand.
+
+The cost is accepted deliberately: every figure in the README that derives
+from inventory, GL or invoices changes with this commit, and each is re-earned
+from an actual run rather than carried over.
+
+### Consequences
+
+Easier: one flow to reason about; issues carry the order that consumed them, so
+order costing is a keyed join; and production variance becomes computable.
+
+Harder: purchase quantities rise by roughly seventy times to cover production,
+which changes every monetary total in the project. The three-way match is
+affected because invoices follow receipts, so CTRL-004's figures move. Issues
+must still be bounded by what is on hand at the moment of issue, and that
+bound is now driven by production demand rather than by a configured ratio —
+so a profile whose production outruns its purchasing fails loudly instead of
+going quietly negative.
+
+`issues_per_receipt` is removed from the configuration. Issue volume is no
+longer a ratio to invent; it is what the orders consumed.
+
+### How a reviewer can verify it
+
+`make data && make reload && make build && make controls` on a clean run:
+CTRL-003 ties the subledger to the GL, CTRL-010 shows no negative on-hand, and
+the new consumption-to-issue control reports zero exceptions. The generator
+test suite asserts that every consumption line has a matching issue of the same
+quantity, that total receipts exceed total consumption, and that no material
+goes negative at any point in the posting sequence.
+
+## ADR-028: Recognise COGS at dispatch, through a standard-costing chain
+
+- Date: 2026-11-03
+- Status: Accepted
+- Jira: BTB-35 | PR/commit: BTB-35-finance-and-trial-balance
+- Area: Modeling
+
+### Context
+
+BTB-35 asks for journal entries covering goods issues, production variances and
+cost of goods sold. Two of those had nowhere to go.
+
+Before this, the general ledger ran from purchase to consumption only: a receipt
+debited inventory and credited GR/IR, an issue credited inventory and debited a
+consumption expense account. Production was **invisible to finance**. The
+factory completed 1,199 units in the demo window and not one of them touched
+the books -- no work in process, no finished goods, no variance, no cost of
+sale. A balance sheet built from this would show components bought and expensed
+and no product anywhere.
+
+There is also no sales side in this project: no customers, no outbound
+deliveries, no revenue. So "cost of goods **sold**" has, literally, nothing to
+attach to.
+
+### Options considered
+
+1. **Treat consumption as COGS.** Reclassify account 510000 so issuing
+   components to a production order is the expense event. Cheapest by far and
+   nothing already published moves. But it is accounting fiction: in any
+   standard-costing system a component issue capitalises into work in process
+   rather than being expensed. It also answers the open question already
+   recorded in docs/metric_definitions.md ("COGS: recognised at goods issue or
+   at shipment?") the less defensible way, and production variances would have
+   no work-in-process account to land in.
+
+2. **Build the chain as far as finished goods and post no COGS**, on the stated
+   grounds that there is no sale. Honest about what the data supports. But it
+   leaves one of the story's four acceptance criteria unmet, and finished goods
+   would accumulate on the balance sheet for ever with nothing relieving them.
+
+3. **Add a dispatch movement and recognise COGS against it.** Component issue
+   capitalises into work in process; a production confirmation moves completed
+   units into finished goods at standard cost; scrap and the work-in-process
+   residual become variances; a dispatch -- SAP's movement type 601, goods
+   issue for delivery -- relieves finished goods and recognises cost of sale.
+   No customer master, just a dispatch.
+
+### Decision
+
+Option 3.
+
+    issue      261   Cr 130000 raw materials     Dr 135000 work in process
+    confirm    101   Cr 135000 work in process   Dr 137000 finished goods
+    scrap            Cr 135000 work in process   Dr 530000 scrap expense
+    residual         Cr/Dr 135000                <-> 520000 production variance
+    dispatch   601   Cr 137000 finished goods    Dr 510000 cost of goods sold
+
+### Reasons
+
+It is the only option that meets the story honestly. Options 1 and 2 each fail
+a criterion, and option 1 fails it by misstating what the entry means.
+
+It puts production on the balance sheet. Work in process and finished goods are
+where a manufacturer's money actually sits between buying a component and
+selling a product, and a BI team's inventory reporting is largely about those
+two accounts.
+
+It makes the variance real. Actual consumption absorbed into work in process
+against the standard cost relieved out of it is the definition of a production
+variance, and it is only computable once both sides post. This is also why
+ADR-027 had to come first: with two unrelated flows of components, the whole
+58-fold discrepancy would have landed in the variance account and balanced.
+
+A dispatch is a small, faithful addition. SAP's 601 exists for exactly this and
+needs no customer: a goods issue for delivery relieves stock and charges cost
+of sale. Inventing a sales module to justify COGS would have been far more
+synthetic than one movement type.
+
+### Consequences
+
+Easier: the balance sheet carries product; per-order costing is a keyed join on
+`order_number`; and Phase 3 can report standard-versus-actual variance from a
+model rather than from arithmetic nobody can trace.
+
+Harder: a fourth and fifth movement type, so the accepted-values tests, the
+movement-direction mapping and the GL account determination all widen. CTRL-003
+ties the subledger to a **single** inventory account today; with stock in three
+accounts it has to reconcile per account or it silently stops covering two
+thirds of inventory. CTRL-010 must now hold for finished goods as well, which
+means dispatch cannot exceed what production confirmed.
+
+Finished goods are dispatched at standard cost, so there is no margin anywhere
+in this project. That is deliberate: without revenue, a margin would be an
+invention. It is stated here so nobody reads the absence as an omission.
+
+### How a reviewer can verify it
+
+`raw.chart_of_accounts` declares every account and its type.
+`make build && make controls` shows CTRL-002 confirming every accounting
+document still balances to zero, CTRL-003 tying each inventory account to its
+subledger, and CTRL-010 showing no negative balance in any of the three. Tests
+assert that work in process nets to its variance, that dispatch never exceeds
+confirmed output, and that the chain's accounts come from the declared chart
+rather than from constants in Python.
+
+## ADR-029: The trial balance is a source extract derived from the postings
+
+- Date: 2026-11-03
+- Status: Accepted
+- Jira: BTB-35 | PR/commit: BTB-35-finance-and-trial-balance
+- Area: Controls
+
+### Context
+
+BTB-35 requires a monthly trial balance that balances to zero per period. It
+could be computed in the warehouse from the postings already loaded, or arrive
+as its own extract from the finance system.
+
+`generator/config.yaml` has declared a freshness window for
+`finance_trial_balance` since Phase 0, with nothing behind it.
+
+### Options considered
+
+1. **A warehouse model only.** Aggregate `stg_gl_postings` by account and
+   period, and test that each period sums to zero. Simplest, and the zero-sum
+   property is still asserted. But it only tests our own arithmetic: postings
+   that balance per document must balance per period, so the test cannot fail
+   for any reason a reviewer would care about. The declared freshness window
+   stays unbacked.
+
+2. **A source extract, derived from the postings.** One row per account per
+   period, generated from the same postings so it reconciles to the cent on a
+   clean run.
+
+### Decision
+
+Option 2. `raw.trial_balance` carries opening balance, debits, credits and
+closing balance per account per period, and a control reconciles it against the
+sum of the postings.
+
+### Reasons
+
+It creates a real cross-system reconciliation: "the trial balance finance
+published agrees with the postings they sent us." That is a control an auditor
+would recognise, and option 1 cannot produce one because there is only one
+system in it.
+
+Deriving it rather than generating it independently is the same choice as
+production confirmations deriving from the MES outcome (BTB-33) and goods
+issues deriving from consumption (ADR-027). The clean run then reconciles
+exactly, so any difference is a finding rather than noise -- and a control whose
+baseline is noise cannot detect anything.
+
+It also backs the freshness window that configuration has been promising since
+Phase 0.
+
+### Consequences
+
+Easier: an exact baseline for the reconciliation, and opening balances that
+make the first period's figures meaningful rather than starting from nothing.
+
+Harder: the trial balance depends on every posting, so it is the last extract
+generated and must be written after the general ledger -- another deferred
+extract, with the ordering that implies. And because it is derived, it cannot
+by itself detect an error in the postings; it detects disagreement between the
+two. The checks that validate the postings themselves (CTRL-002's document
+balance, CTRL-003's subledger tie) remain the ones doing that work.
+
+### How a reviewer can verify it
+
+`raw.trial_balance` loads alongside the other extracts, and `make controls`
+reports the per-period zero-sum check and the trial-balance-to-postings
+reconciliation. Both are mutation-tested: changing one closing balance, and
+changing one posting, each produce a named exception.

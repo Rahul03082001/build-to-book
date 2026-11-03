@@ -47,14 +47,45 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-#: How far a measured per-step failure rate may sit from the configured one.
+#: Standard errors of slack allowed on a measured per-step failure rate.
 #:
-#: Sampling noise, not slack in the invariant: at the demo profile's ~15,000
-#: units a 1% rate has a standard error around 0.08pp, so a tight bound would
-#: fail on correct data roughly as often as it caught a fault. The exact
-#: invariants above carry the weight; this one catches a rate wired to the
-#: wrong step.
-FAILURE_RATE_TOLERANCE_PCT = 0.5
+#: Four, not a fixed number of percentage points. A fixed tolerance is wrong in
+#: principle because it only fits one sample size, and this one proved it: 0.5pp
+#: was derived from a profile with 60,000 MES events, and when the demo profile
+#: dropped to 5,000 the same bound sat BELOW one standard error -- so burn_in
+#: reported 6.84% against a configured 5.50% and failed a clean extract.
+#:
+#: Scaling with the sample is the only version that works for every profile:
+#: 2.58pp of slack at 5,000 events, 0.08pp at five million. Four standard
+#: errors is roughly a one-in-15,000 false alarm per step, which is rare enough
+#: for a check that fails a run.
+#:
+#: The exact invariants above carry the weight. This one catches a rate wired
+#: to the wrong step, not a rate that is a fraction of a point out.
+FAILURE_RATE_STANDARD_ERRORS = 4.0
+
+#: Floor on the slack, in percentage points.
+#:
+#: At five million events four standard errors is 0.08pp, and rework means the
+#: attempts are not quite independent trials -- so a floor keeps an enormous
+#: sample from being held to a bound tighter than the model deserves.
+FAILURE_RATE_TOLERANCE_FLOOR_PCT = 0.10
+
+
+def _rate_tolerance_pct(rate: float, attempts: int) -> float:
+    """Slack allowed on a measured failure rate, in percentage points.
+
+    The binomial standard error for `attempts` draws at probability `rate`,
+    multiplied by `FAILURE_RATE_STANDARD_ERRORS` and floored. Derived rather
+    than configured, because the right bound depends on how many attempts there
+    were and no single constant fits both 5,000 events and five million.
+    """
+    import math
+
+    if attempts <= 0:
+        return FAILURE_RATE_TOLERANCE_FLOOR_PCT
+    standard_error = math.sqrt(max(rate, 1e-9) * (1.0 - rate) / attempts) * 100.0
+    return max(FAILURE_RATE_TOLERANCE_FLOOR_PCT, FAILURE_RATE_STANDARD_ERRORS * standard_error)
 
 
 class ExtractUnreadableError(Exception):
@@ -190,11 +221,17 @@ def verify(data_dir: pathlib.Path) -> dict[str, Any]:
             continue
         measured = 100.0 * step_failures[step] / attempts
         expected = 100.0 * configured_rates[step]
-        rates[step] = {"attempts": attempts, "measured_pct": measured, "configured_pct": expected}
-        if abs(measured - expected) > FAILURE_RATE_TOLERANCE_PCT:
+        tolerance = _rate_tolerance_pct(configured_rates[step], attempts)
+        rates[step] = {
+            "attempts": attempts,
+            "measured_pct": measured,
+            "configured_pct": expected,
+            "tolerance_pct": tolerance,
+        }
+        if abs(measured - expected) > tolerance:
             violations.append(
                 f"step {step!r} failed {measured:.2f}% of attempts against a configured "
-                f"{expected:.2f}% (tolerance {FAILURE_RATE_TOLERANCE_PCT}pp)"
+                f"{expected:.2f}% (tolerance {tolerance:.2f}pp over {attempts:,} attempts)"
             )
 
     return {
@@ -219,11 +256,12 @@ def _print_report(report: dict[str, Any]) -> None:
     print(f"{'units scrapped':24}{report['units_scrapped']:>12,}")
     print(f"{'first-pass yield':24}{report['first_pass_yield_pct']:>11.1f}%")
     print()
-    print(f"{'step':18}{'attempts':>12}{'measured':>11}{'configured':>12}")
+    print(f"{'step':18}{'attempts':>12}{'measured':>11}{'configured':>12}{'tolerance':>12}")
     for step, figures in report["steps"].items():
         print(
             f"{step:18}{figures['attempts']:>12,}"
             f"{figures['measured_pct']:>10.2f}%{figures['configured_pct']:>11.2f}%"
+            f"{figures['tolerance_pct']:>11.2f}pp"
         )
     print()
     if report["violations"]:
