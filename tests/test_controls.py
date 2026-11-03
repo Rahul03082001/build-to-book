@@ -200,3 +200,53 @@ def test_closed_period_control_is_implemented() -> None:
     # period locks.
     assert "%(close_lag_days)s" in control.sql
     assert "entered_on" in control.sql
+
+
+def test_an_implemented_control_does_not_advertise_itself_as_pending(
+    matrix: dict[str, dict[str, str]],
+) -> None:
+    """A running control whose row still says "Phase 4" understates coverage.
+
+    The matrix is what a reviewer reads to find out what exists. Three rows had
+    drifted this way -- CTRL-002, CTRL-004 and CTRL-005 all said "Phase 4"
+    while passing on every run -- because implementing a control and describing
+    it are two separate edits and only one of them was enforced.
+
+    A bare future-phase marker is the pending form. Anything that says
+    "Implemented", or names the phase it landed in, is the implemented form.
+    """
+    pending = re.compile(r"^Phase [2-9]\b")
+    for check in checks.PHASE_1_CHECKS:
+        status = matrix[check.check_id]["Status"]
+        assert not pending.match(status.strip()), (
+            f"{check.check_id} runs on every build but its matrix status reads "
+            f"{status!r}, which claims it is still to come"
+        )
+
+
+def test_a_pending_control_has_no_check(matrix: dict[str, dict[str, str]]) -> None:
+    """The other direction: a row claiming a control is pending must be pending.
+
+    This pins understatement from both sides. It does NOT catch the opposite
+    fault -- a row claiming "Implemented" for a control that is not -- and it
+    cannot, because several controls are implemented as privileges and triggers
+    rather than as registered checks: CTRL-012 (segregation of duties),
+    CTRL-013 (roles) and CTRL-014 (append-only audit) have no entry in the
+    check registry and are correctly described as implemented. Asserting
+    "implemented implies a check" would fail on all three. Those three are pinned
+    elsewhere, by test rather than by control ID:
+    `test_roles.py::test_table_privilege` and
+    `test_reporter_is_denied_raw_on_a_real_connection` for the roles, and
+    `test_loading.py::test_audit_trail_refuses_modification` and
+    `test_audit_trail_survived_those_attempts` for the append-only trail. That
+    link holds by convention -- none of those tests names the control it
+    evidences -- which is a traceability gap, not coverage this test can
+    close.
+    """
+    implemented = {c.check_id for c in checks.PHASE_1_CHECKS}
+    pending = re.compile(r"^Phase [2-9]\b")
+    for control_id, row in matrix.items():
+        if pending.match(row["Status"].strip()):
+            assert control_id not in implemented, (
+                f"{control_id} is described as pending but a check is registered for it"
+            )

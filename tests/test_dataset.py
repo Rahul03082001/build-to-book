@@ -46,9 +46,28 @@ def test_load_order_covers_every_spec() -> None:
 def test_every_extract_in_load_order_is_actually_generated(
     built: tuple[dataset.Dataset, list],
 ) -> None:
-    """An extract that is declared but never produced loads as a missing file."""
+    """An extract that is declared but never produced loads as a missing file.
+
+    Every name in LOAD_ORDER must be produced by exactly one of the three
+    mechanisms -- in memory, streamed, or deferred until the stream it derives
+    from has been consumed. A name in none of them is a missing file at load
+    time; a name in two is ambiguous about which copy wins.
+    """
     data, _ = built
-    assert set(data.as_mapping()) == set(dataset.LOAD_ORDER)
+    in_memory = set(data.as_mapping())
+    streamed = set(data.streams)
+    deferred = set(data.deferred)
+
+    produced = in_memory | streamed | deferred
+    assert produced == set(dataset.LOAD_ORDER), (
+        f"declared but not produced: {sorted(set(dataset.LOAD_ORDER) - produced)}; "
+        f"produced but not declared: {sorted(produced - set(dataset.LOAD_ORDER))}"
+    )
+    assert streamed == dataset.STREAMED
+    assert deferred == dataset.DEFERRED
+    for pair in ((in_memory, streamed), (in_memory, deferred), (streamed, deferred)):
+        assert not pair[0] & pair[1], f"produced two ways: {sorted(pair[0] & pair[1])}"
+
     for name, rows in data.as_mapping().items():
         assert rows, f"{name} generated zero rows"
 

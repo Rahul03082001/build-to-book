@@ -171,3 +171,23 @@ def test_singular_tests_exist_for_the_cross_model_invariants() -> None:
         "assert_as_of_join_does_not_multiply_facts",
     }
     assert required <= tests, f"missing singular tests: {required - tests}"
+
+
+def test_the_mes_final_step_var_matches_the_generator_route() -> None:
+    """dbt and the generator must agree on which step ends the route.
+
+    `is_final_step` decides what "completed" means, and CTRL-005 compares that
+    against ERP confirmations. If the two disagreed, every order would show
+    zero MES completions and the control would fail on all of them -- a loud
+    failure pointing at the wrong cause, which is worse to diagnose than a
+    quiet one.
+    """
+    project = yaml.safe_load((DBT_DIR / "dbt_project.yml").read_text())
+    config = yaml.safe_load((DBT_DIR.parent.parent / "generator" / "config.yaml").read_text())
+
+    route = [step["name"] for step in config["domain"]["mes_steps"]]
+    assert route, "the generator declares no MES steps"
+    assert project["vars"]["mes_final_step"] == route[-1], (
+        f"dbt says the route ends at {project['vars']['mes_final_step']!r}, "
+        f"the generator says {route[-1]!r}"
+    )

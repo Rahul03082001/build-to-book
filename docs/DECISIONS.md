@@ -53,6 +53,48 @@ SOX-style controls. Nothing here claims SOX compliance (ADR-019).
 - Jira: BTB-3 | PR/commit: initial commit
 - Area: Data
 
+> **Amendment 2026-11-02, found while testing the MES stream (BTB-33).** The
+> decision below stands: one seed reproduces the dataset. But "one seed" was
+> implemented as one shared `Generator` that every source drew from in turn,
+> and that is not sufficient for a **streamed** source. The original reasoning
+> is left intact rather than rewritten.
+>
+> A test that consumed `streams["mes_unit_events"]` twice got 60,767 events and
+> then 60,677. The stream drew from the shared generator, which had already
+> advanced, so a second pass produced different data. The run as shipped never
+> noticed, because it consumes the stream exactly once — and the control totals
+> are computed during that same pass, so they agreed with whatever that pass
+> happened to produce. **The sidecar matched the file; neither matched the
+> previous run.**
+>
+> Options considered, once the fault was visible:
+>
+> 1. **Snapshot the shared generator's state and restore it after the stream.**
+>    Keeps one seed literally. But it makes every MES figure depend on how many
+>    draws the *earlier* generators made, so adding a column to the invoice
+>    generator silently changes every serial number.
+> 2. **Materialise the extract once and replay the rows.** Trivially
+>    reproducible, and it throws away the entire reason the source is streamed:
+>    5M events will not fit in memory (ADR-024, ADR-016).
+> 3. **Give the streamed source its own seed, derived from the run seed, and
+>    re-seed at the start of each consumption.** Chosen. Reproducible across
+>    repeated consumption, and independent of earlier generators' draw counts.
+>
+> Option 3 costs one property worth stating: MES no longer shares a random
+> stream with the other sources, so a correlation between, say, a supplier's
+> deliveries and a station's failures could not arise by construction. Nothing
+> in the project wants one — the relationships that matter are keyed joins, not
+> shared noise.
+>
+> The tally object is reset **in place** rather than rebound, because the
+> dataset hands it to the confirmations writer before anything has streamed.
+> Rebinding left that writer holding an outcome stuck at zero while the real
+> counts accumulated on a different object: 14,793 confirmations reported
+> against 0 units started.
+>
+> Verified: two independent runs of `python -m generator --profile demo` now
+> produce 16 byte-identical extracts.
+
 ### Context
 
 The project's whole claim is that its controls work. A control that has never

@@ -39,6 +39,15 @@ vars:
   # several invoices without admitting a real price difference.
   three_way_match_price_tolerance_pct: 0.005
 
+  # The last step on the MES route. "Completed" means a unit passed this step,
+  # so CTRL-005 depends on it naming the same step generator/config.yaml puts
+  # last. It was a literal in stg_mes_unit_events; a route change would then
+  # have left nothing marked as the final step, every order showing zero MES
+  # completions, and CTRL-005 reporting a gap on all 8,000 of them -- loud, but
+  # pointing at the wrong thing. tests/test_dbt_project.py pins the two
+  # together.
+  mes_final_step: final_test
+
 flags:
   send_anonymous_usage_stats: false
   require_explicit_package_overrides_for_builtin_materializations: true

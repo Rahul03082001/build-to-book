@@ -53,9 +53,8 @@ def repo_root() -> pathlib.Path:
 def generate_extracts(out_dir: pathlib.Path, defect_keys: tuple[str, ...] = ()) -> dict[str, Any]:
     """Generate the demo extracts, planting the given defects. Returns the manifest."""
     from generator import config as genconfig
-    from generator import dataset, defects, writers
+    from generator import dataset, defects
 
-    out_dir.mkdir(parents=True, exist_ok=True)
     cfg = genconfig.load()
     # Built through dataset.build, not InventoryGenerator directly: this helper
     # must produce every extract the loader expects. Generating only the
@@ -68,8 +67,10 @@ def generate_extracts(out_dir: pathlib.Path, defect_keys: tuple[str, ...] = ()) 
     for record in planted:
         manifest.add(record)
 
-    for name, rows in data.as_mapping().items():
-        writers.write_extract(dataset.EXTRACT_SPECS[name], rows, out_dir, EXTRACT_STAMP)
+    # dataset.write_all, not a local loop over as_mapping(): streamed and
+    # deferred extracts need the dispatch the CLI uses, and a helper with its
+    # own copy of it falls behind the moment a source changes shape.
+    dataset.write_all(data, out_dir, EXTRACT_STAMP)
     manifest.write(out_dir / "defects_manifest.json")
     return manifest.to_dict()
 
