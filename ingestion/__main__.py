@@ -2,10 +2,23 @@
 
     python -m ingestion
     python -m ingestion --data-dir data --extract goods_movements
+    python -m ingestion --reset           # empty raw first, then load
 
 Every file in one invocation shares a batch id. A rerun inserts nothing and
 reports what it skipped (ADR-020), and each file's outcome is recorded in
 `audit.pipeline_runs` whether it succeeded or failed (ADR-008).
+
+`--reset` exists because insert-only loading cannot backfill. The anti-join
+matches on the natural key, so a row already in `raw` is skipped whatever its
+other columns say -- which means a source that gains a **column** loads
+cleanly and leaves every existing row holding a null. That is ADR-020's
+recorded limitation, and it bit on BTB-34: `goods_movements` gained
+`inbound_delivery`, 1,242 receipts skipped, and all 1,242 kept a null delivery
+while the extract on disk had the value.
+
+The audit trail is not touched. It is append-only and a TRUNCATE on it is
+blocked by a statement-level trigger (ADR-008), so the history of what was
+loaded survives a reset of what was loaded into.
 """
 
 from __future__ import annotations
@@ -13,6 +26,8 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
+from collections.abc import Sequence
+from typing import Any
 
 from generator import dataset
 from ingestion import db, loader, schemas
@@ -42,6 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Reuse a batch id instead of generating one. Mainly for reruns.",
     )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help=(
+            "Empty the raw tables before loading. Needed when an extract gains "
+            "a column, because an incremental load cannot backfill one. Does "
+            "not touch the append-only audit trail."
+        ),
+    )
     return parser
 
 
@@ -49,6 +73,28 @@ def build_parser() -> argparse.ArgumentParser:
 # moment a source system is added -- and the symptom would be an extract that
 # generates fine and silently never loads.
 LOAD_ORDER = list(dataset.LOAD_ORDER)
+
+
+def reset_raw(connection: Any, extracts: Sequence[str]) -> int:
+    """Empty the given raw tables. Returns how many were emptied.
+
+    One statement so the tables come back empty together: truncating them one
+    at a time would leave a window where `goods_movements` is empty and
+    `purchase_order_lines` is not, and anything reading raw in between would
+    see a referentially broken warehouse.
+
+    Table names come from the declared load order, never from user input, so
+    there is nothing here to interpolate unsafely.
+    """
+    if not extracts:
+        return 0
+    unknown = [name for name in extracts if name not in LOAD_ORDER]
+    if unknown:
+        raise ValueError(f"not declared in the load order: {unknown}")
+    targets = ", ".join(f"raw.{name}" for name in extracts)
+    with connection.transaction(), connection.cursor() as cursor:
+        cursor.execute(f"TRUNCATE {targets}")
+    return len(extracts)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print(BANNER)
     print(f"batch={batch_id}  commit={commit[:12]}  data={args.data_dir}")
+    if args.reset:
+        with db.connect() as connection:
+            emptied = reset_raw(connection, extracts)
+        print(f"reset: emptied {emptied} raw table(s) before loading")
     print()
     header = f"{'extract':24}{'in file':>9}{'inserted':>10}{'skipped':>9}{'rejected':>10}  complete"
     print(header)

@@ -113,6 +113,10 @@ data: ## Generate synthetic source extracts + control totals
 	$(PY) -m generator --profile $(PROFILE) --seed $(SEED) \
 		$(foreach d,$(DEFECTS),--defect $(d))
 
+.PHONY: explain-defect
+explain-defect: ## Explain a defect and whether its injector is built (DEFECT=key, or all)
+	$(PY) scripts/explain_defect.py $(if $(DEFECT),$(DEFECT),--list)
+
 .PHONY: data-defects
 data-defects: ## Generate extracts with every implemented defect planted
 	$(PY) -m generator --profile $(PROFILE) --seed $(SEED) --defect all
@@ -120,6 +124,10 @@ data-defects: ## Generate extracts with every implemented defect planted
 .PHONY: load
 load: ## Validate and incrementally load extracts into raw
 	$(PY) -m ingestion --data-dir $(or $(DATA_DIR),data)
+
+.PHONY: reload
+reload: ## Empty raw and load from scratch -- needed when an extract gains a column
+	$(PY) -m ingestion --data-dir $(EXTRACT_DIR) --reset
 
 .PHONY: audit-schema
 audit-schema: ## Create the append-only audit tables

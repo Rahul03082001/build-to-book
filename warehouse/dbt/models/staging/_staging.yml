@@ -507,6 +507,72 @@ models:
             config:
               where: "result = 'PASS'"
 
+  - name: stg_shipment_headers
+    description: >
+      GRAIN: one row per inbound delivery.
+
+      Carries `days_late` but deliberately no on-time flag: whether on time
+      means exact or allows a tolerance window, and whether it is measured by
+      line or by shipment, are open questions for BTB-44
+      (docs/metric_definitions.md). A flag here would answer them by accident.
+    columns:
+      - name: inbound_delivery
+        data_tests: [unique, not_null]
+      - name: supplier_number
+        description: >
+          Nullable: the `missing_supplier_on_shipment` defect nulls it and
+          CTRL-009 detects it.
+      - name: shipped_date
+        data_tests: [not_null]
+      - name: promised_arrival_date
+        data_tests: [not_null]
+      - name: days_late
+        description: >
+          Arrived minus promised. Positive is late, negative is early, null
+          means not yet arrived -- null rather than zero, because zero would
+          count an unarrived shipment as on time.
+      - name: is_received
+        data_tests: [not_null]
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["RECEIVED", "IN_TRANSIT"]
+
+  - name: stg_shipment_lines
+    description: >
+      GRAIN: one row per purchase order line per inbound delivery.
+    columns:
+      - name: inbound_delivery
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_shipment_headers')
+                field: inbound_delivery
+      - name: po_number
+        data_tests: [not_null]
+      - name: quantity_shipped
+        data_tests: [not_null]
+      - name: material_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_material_current')
+                field: material_number
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [inbound_delivery, shipment_item]
+      # The reconciliation key. Merging receipt splits at source is what makes
+      # this hold; one line per receipt row left two deliveries with duplicate
+      # order lines.
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [inbound_delivery, po_number, po_item]
+
   - name: stg_production_confirmations
     description: >
       GRAIN: one row per confirmation. Derived from the MES outcome, so

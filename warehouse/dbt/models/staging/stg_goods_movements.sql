@@ -31,6 +31,11 @@ select
     to_char(posting_date, 'YYYY-MM') as posting_period,
     po_number,
     po_item,
+    -- The inbound delivery this receipt arrived on (ADR-026). Null on issues,
+    -- which have no supplier shipment -- so a join to shipments must be an
+    -- outer one, and `is_inbound_receipt` says which rows can have a match.
+    inbound_delivery,
+    inbound_delivery is not null     as has_inbound_delivery,
     entered_by,
     _batch_id                        as batch_id,
     _source_file                     as source_file,

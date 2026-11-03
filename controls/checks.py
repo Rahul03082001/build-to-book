@@ -472,6 +472,67 @@ INVOICE_REFERENCES_A_PURCHASE_ORDER = Check(
 )
 
 # ---------------------------------------------------------------------------
+# CTRL-009, second check: the supply chain feed's foreign keys.
+#
+# A separate check under the same control rather than a widening of the one
+# above, matching how CTRL-001, CTRL-002 and CTRL-003 are each several named
+# checks. Each one then says what it actually looked at, and a report naming
+# "every invoice line references a real purchase order line" cannot quietly
+# mean "and also some shipment things".
+#
+# Both faults are reported by one check because they are one risk: a fact
+# pointing at a dimension member that does not exist. A null supplier and an
+# unknown supplier differ only in how the reference broke.
+# ---------------------------------------------------------------------------
+SHIPMENT_REFERENCES_RESOLVE = Check(
+    check_id="CTRL-009",
+    name="Every shipment names a real supplier and a real purchase order line",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "A shipment with no supplier cannot be attributed to anyone, so it silently "
+        "drops out of supplier on-time delivery and spend by vendor -- the figures look "
+        "complete and are not. A shipment line pointing at a purchase order line that "
+        "does not exist is goods arriving against nothing anybody ordered."
+    ),
+    sql="""
+        select
+            'delivery ' || h.inbound_delivery
+                || ' has no supplier'                            as exception_detail
+        from {staging}.stg_shipment_headers as h
+        where h.supplier_number is null
+        union all
+        select
+            'delivery ' || h.inbound_delivery
+                || ' names supplier ' || h.supplier_number
+                || ', which does not exist'
+        from {staging}.stg_shipment_headers as h
+        where
+            h.supplier_number is not null
+            and not exists (
+                select 1
+                from {staging}.stg_suppliers as s
+                where s.supplier_number = h.supplier_number
+            )
+        union all
+        select
+            'delivery ' || l.inbound_delivery
+                || ' item ' || l.shipment_item
+                || ' references PO ' || l.po_number || '/' || l.po_item
+                || ', which does not exist'
+        from {staging}.stg_shipment_lines as l
+        where not exists (
+            select 1
+            from {staging}.stg_purchase_order_lines as p
+            where
+                p.po_number = l.po_number
+                and p.po_item = l.po_item
+        )
+        order by 1
+    """,
+)
+
+# ---------------------------------------------------------------------------
 # CTRL-005: MES versus ERP completion.
 #
 # Production output reported to finance must match what the factory actually
@@ -519,6 +580,7 @@ PHASE_1_CHECKS: tuple[Check, ...] = (
     GL_DOCUMENTS_BALANCE,
     THREE_WAY_MATCH,
     INVOICE_REFERENCES_A_PURCHASE_ORDER,
+    SHIPMENT_REFERENCES_RESOLVE,
     MES_TO_ERP_COMPLETION,
     SUBLEDGER_TO_GL,
     INVENTORY_VALUE_AGREES_WITH_COST,

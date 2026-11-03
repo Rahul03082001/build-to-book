@@ -157,3 +157,55 @@ models:
                   - COMPLETION_GAP
                   - MES_WITHOUT_CONFIRMATION
                   - NO_MES_ACTIVITY
+
+  - name: int_inbound_delivery_performance
+    description: >
+      GRAIN: one row per inbound delivery line (inbound_delivery,
+      shipment_item).
+
+      The keyed ASN-to-receipt join ADR-026 exists for. A receipt carries the
+      delivery it arrived on, so this joins on a key rather than guessing from
+      purchase order line and date -- which matters because partial deliveries
+      mean one order line can have two shipments.
+
+      EVERY delivery line appears. An in-transit line is an open commitment,
+      not a missing receipt, and an inner join would delete exactly the rows
+      that make the distinction visible.
+
+      Exposes the ingredients of supplier on-time delivery and stops short of
+      the metric: both the by-line and by-shipment groupings are available
+      from this grain, and the definition is BTB-44's to make.
+    columns:
+      - name: inbound_delivery
+        data_tests: [not_null]
+      - name: quantity_shipped
+        data_tests: [not_null]
+      - name: quantity_received
+        description: Zero on an in-transit line, because nothing has arrived.
+        data_tests: [not_null]
+      - name: quantity_in_transit
+        description: >
+          Shipped minus received. Zero on every received line by construction,
+          so a non-zero value on one is a real finding rather than noise.
+        data_tests: [not_null]
+      - name: days_late_versus_promise
+        description: Against the supplier's ASN commitment. Null until arrival.
+      - name: days_late_versus_order
+        description: >
+          Against the purchase order's agreed date. A supplier can hit its own
+          re-promised date and still be late against the order, which is why
+          both are carried.
+      - name: delivery_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - RECONCILED
+                  - IN_TRANSIT
+                  - SHIPPED_NOT_RECEIVED
+                  - QUANTITY_DISCREPANCY
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [inbound_delivery, shipment_item]

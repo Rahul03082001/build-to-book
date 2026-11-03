@@ -211,6 +211,10 @@ EXTRACT_SPECS: dict[str, ExtractSpec] = {
             "po_number",
             "po_item",
             "entered_by",
+            # Stamped by the shipment generator after the movements exist
+            # (ADR-026). Declared here because the writer rejects a column it
+            # was not told about -- which is how the first attempt was caught.
+            "inbound_delivery",
         ],
         source_system="ERP",
         value_column="amount_usd",
@@ -745,6 +749,15 @@ class InventoryGenerator:
                         "po_number": item.get("po_number"),
                         "po_item": item.get("po_item"),
                         "entered_by": self._choice(_CLERKS),
+                        # Stamped later by the shipment generator, which only
+                        # exists once the receipts do (ADR-026). Emitted as
+                        # None rather than omitted so this generator's output
+                        # satisfies its own declared spec: the writer checks
+                        # rows against the spec's columns, so a generator that
+                        # emits 14 of 15 cannot write its own slice -- which
+                        # broke six tests that generate the inventory slice
+                        # alone.
+                        "inbound_delivery": None,
                     }
                 )
         return rows

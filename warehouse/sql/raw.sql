@@ -158,15 +158,79 @@ CREATE TABLE IF NOT EXISTS raw.goods_movements (
     po_number               text,
     po_item                 integer,
     entered_by              text           NOT NULL,
+    -- The inbound delivery this receipt arrived on (ADR-026). Null on issues,
+    -- which have no supplier shipment. The link is recorded here rather than
+    -- inferred from the purchase order line and a date, because partial
+    -- deliveries mean one line can have two shipments.
+    inbound_delivery        text,
     _batch_id               text           NOT NULL,
     _source_file            text           NOT NULL,
     _file_sha256            char(64)       NOT NULL,
     _loaded_at              timestamptz    NOT NULL DEFAULT now()
 );
+-- CREATE TABLE IF NOT EXISTS does not alter an existing table, so a warehouse
+-- created before inbound_delivery existed needs the column added -- otherwise
+-- the index below fails on a column that is not there, which is how this was
+-- found.
+ALTER TABLE raw.goods_movements ADD COLUMN IF NOT EXISTS inbound_delivery text;
+
 CREATE UNIQUE INDEX IF NOT EXISTS goods_movements_nk
     ON raw.goods_movements (material_document, fiscal_year, material_document_item);
 CREATE INDEX IF NOT EXISTS goods_movements_posting_idx
     ON raw.goods_movements (posting_date);
+-- The delivery-performance join reads every receipt by delivery.
+CREATE INDEX IF NOT EXISTS goods_movements_delivery_idx
+    ON raw.goods_movements (inbound_delivery);
+
+-- Inbound deliveries, shaped on SAP's LIKP and LIPS. An advance ship notice
+-- is a promise that arrives before the goods do, so every receipt records the
+-- delivery it came in on (ADR-026).
+CREATE TABLE IF NOT EXISTS raw.shipment_headers (
+    inbound_delivery      text        NOT NULL,
+    -- Nullable on purpose: the `missing_supplier_on_shipment` defect nulls it
+    -- and CTRL-009 detects it. A NOT NULL here would reject the defect at the
+    -- door and the control would have nothing to find.
+    supplier_number       text,
+    carrier_code          text        NOT NULL,
+    carrier_name          text        NOT NULL,
+    shipped_date          date        NOT NULL,
+    -- The supplier's own commitment: ship date plus the carrier's planned
+    -- transit. Distinct from the purchase order's delivery date, so on-time
+    -- delivery can be measured against either (BTB-44).
+    promised_arrival_date date        NOT NULL,
+    -- Null while in transit. A date here would make an unreceived shipment
+    -- look delivered and count towards on-time performance.
+    arrived_date          date,
+    planned_transit_days  integer     NOT NULL,
+    status                text        NOT NULL,
+    total_quantity_shipped integer    NOT NULL,
+    _batch_id             text        NOT NULL,
+    _source_file          text        NOT NULL,
+    _file_sha256          char(64)    NOT NULL,
+    _loaded_at            timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS shipment_headers_nk
+    ON raw.shipment_headers (inbound_delivery);
+CREATE INDEX IF NOT EXISTS shipment_headers_supplier_idx
+    ON raw.shipment_headers (supplier_number);
+
+CREATE TABLE IF NOT EXISTS raw.shipment_lines (
+    inbound_delivery  text        NOT NULL,
+    shipment_item     integer     NOT NULL,
+    po_number         text        NOT NULL,
+    po_item           integer     NOT NULL,
+    material_number   text        NOT NULL,
+    quantity_shipped  integer     NOT NULL,
+    uom               text        NOT NULL,
+    _batch_id         text        NOT NULL,
+    _source_file      text        NOT NULL,
+    _file_sha256      char(64)    NOT NULL,
+    _loaded_at        timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS shipment_lines_nk
+    ON raw.shipment_lines (inbound_delivery, shipment_item);
+CREATE INDEX IF NOT EXISTS shipment_lines_po_idx
+    ON raw.shipment_lines (po_number, po_item);
 
 -- Supplier invoices, shaped on SAP's RBKP and RSEG. The third leg of the
 -- three-way match (CTRL-004).

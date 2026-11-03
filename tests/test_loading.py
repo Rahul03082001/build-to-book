@@ -9,39 +9,47 @@ Chief among them: a rerun must add nothing (ADR-020), the audit trail must
 refuse modification (ADR-008), and the subledger must still tie to the GL after
 the round trip through CSV, validation, COPY and `numeric(18,2)` -- a precision
 loss anywhere in that chain would turn CTRL-003 into a coin flip.
+
+Every property here is checked against **every** declared extract, not a
+subset. See LOAD_ORDER below for what a subset cost.
 """
 
 from __future__ import annotations
 
 import csv
-import datetime as dt
 import decimal
 import json
 import pathlib
 from collections.abc import Iterator
 from typing import Any
 
+import conftest
 import psycopg
 import pytest
 
-from generator import config as genconfig
-from generator import inventory, writers
 from ingestion import db, loader
 
 pytestmark = pytest.mark.integration
 
 D = decimal.Decimal
 
-LOAD_ORDER = [
-    "materials",
-    "suppliers",
-    "standard_costs",
-    "purchase_order_headers",
-    "purchase_order_lines",
-    "goods_movements",
-    "inventory_revaluations",
-    "gl_postings",
-]
+#: Every declared extract, from the generator -- never a second copy.
+#:
+#: This was a hardcoded list of eight. The generator grew to eighteen, and the
+#: list did not: bom_headers, bom_items, shipment_headers, shipment_lines, both
+#: invoice extracts, production_orders, component_consumption, mes_unit_events
+#: and production_confirmations were all silently outside every test in this
+#: module. Idempotency, provenance and audit-trail recording were simply never
+#: checked for them, and nothing failed to say so -- the assertions below
+#: compare against this list, so a short list makes them agree with themselves.
+#:
+#: Deriving it costs 2.9 seconds (5.4s to 8.2s, measured) and covers ten more
+#: sources, including mes_unit_events at 60,774 rows -- the largest extract and
+#: the one where the loader's anti-join performance actually matters.
+#:
+#: `tests/conftest.py` states the same rule for the same reason; this module
+#: was the exception that proved it.
+LOAD_ORDER = list(conftest.LOAD_ORDER)
 
 
 @pytest.fixture(scope="module")
@@ -56,13 +64,18 @@ def conn() -> Iterator[psycopg.Connection]:
 
 @pytest.fixture(scope="module")
 def extracts(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
-    """A freshly generated demo dataset, isolated from the repo's data/ dir."""
+    """A freshly generated demo dataset, isolated from the repo's data/ dir.
+
+    Via the shared helper, which goes through `dataset.write_all`, rather than
+    driving `InventoryGenerator` and the writer directly. The direct path was a
+    second way of constructing extracts and it fell behind: when
+    `goods_movements` gained `inbound_delivery` (BTB-34) the column was stamped
+    by the shipment generator, which this fixture never ran, so every test in
+    the module failed with "row 0 is missing columns". The same fault the
+    conftest helper's own docstring warns about.
+    """
     out = tmp_path_factory.mktemp("extracts")
-    cfg = genconfig.load()
-    data = inventory.InventoryGenerator(cfg, "demo").generate()
-    stamp = dt.datetime(2026, 11, 2, 12, 0, 0)
-    for name, rows in data.as_mapping().items():
-        writers.write_extract(inventory.EXTRACT_SPECS[name], rows, out, stamp)
+    conftest.generate_extracts(out)
     return out
 
 
@@ -446,3 +459,105 @@ def test_loader_connects_as_a_role_that_cannot_read_reporting() -> None:
         "btb_loader_svc" in db.dsn(db.LOADER_ROLE)
         or "BTB_LOADER_PASSWORD" not in __import__("os").environ
     )
+
+
+# ---------------------------------------------------------------------------
+# --reset: emptying raw before a load
+#
+# Needed because insert-only loading cannot backfill. The anti-join matches on
+# the natural key, so a row already in `raw` is skipped whatever its other
+# columns say -- which means a source that gains a COLUMN loads cleanly and
+# leaves every existing row holding a null. ADR-020 records the limitation;
+# BTB-34 hit it when goods_movements gained inbound_delivery and all 1,242
+# receipts skipped, keeping nulls while the extract on disk had the values.
+# ---------------------------------------------------------------------------
+def test_reset_refuses_a_table_it_was_not_told_about() -> None:
+    """Table names are interpolated into a TRUNCATE, so the set is closed.
+
+    They come from the declared load order and never from user input. This
+    pins that: a name outside it is refused rather than reaching the SQL.
+    """
+    from ingestion import __main__ as ingestion_main
+
+    with pytest.raises(ValueError, match="not declared in the load order"):
+        ingestion_main.reset_raw(None, ["raw.something_else; drop table audit.pipeline_runs"])
+    with pytest.raises(ValueError, match="not declared in the load order"):
+        ingestion_main.reset_raw(None, ["pipeline_runs"])
+
+
+def test_reset_with_nothing_to_do_touches_nothing() -> None:
+    from ingestion import __main__ as ingestion_main
+
+    assert ingestion_main.reset_raw(None, []) == 0
+
+
+def test_reset_empties_raw_and_a_reload_restores_it(
+    conn: psycopg.Connection, extracts: pathlib.Path
+) -> None:
+    """The whole point: after a reset, a load inserts rather than skips."""
+    from ingestion import __main__ as ingestion_main
+
+    batch_id = loader.new_batch_id()
+    for name in LOAD_ORDER:
+        loader.load_extract(conn, name, extracts / f"{name}.csv", batch_id)
+
+    with conn.transaction(), conn.cursor() as cursor:
+        cursor.execute("select count(*) from raw.goods_movements")
+        before = cursor.fetchone()[0]
+    assert before > 0
+
+    emptied = ingestion_main.reset_raw(conn, list(LOAD_ORDER))
+    assert emptied == len(LOAD_ORDER)
+
+    with conn.transaction(), conn.cursor() as cursor:
+        cursor.execute("select count(*) from raw.goods_movements")
+        assert cursor.fetchone()[0] == 0
+
+    reloaded = loader.load_extract(
+        conn, "goods_movements", extracts / "goods_movements.csv", loader.new_batch_id()
+    )
+    assert reloaded.rows_inserted == before, (
+        f"after a reset the load inserted {reloaded.rows_inserted} of {before} rows"
+    )
+    assert reloaded.rows_skipped == 0, "a load after a reset must insert, not skip"
+
+
+def test_reset_does_not_touch_the_audit_trail(conn: psycopg.Connection) -> None:
+    """Resetting what was loaded must not erase the record of loading it.
+
+    The trail is append-only and a TRUNCATE on it is blocked by a
+    statement-level trigger (ADR-008) -- which was added after a TRUNCATE
+    silently erased eight rows. This asserts the reset keeps its hands off it.
+    """
+    from ingestion import __main__ as ingestion_main
+
+    with conn.transaction(), conn.cursor() as cursor:
+        cursor.execute("select count(*) from audit.pipeline_runs")
+        before = cursor.fetchone()[0]
+    assert before > 0, "no audit history yet, so this proves nothing"
+
+    ingestion_main.reset_raw(conn, list(LOAD_ORDER))
+
+    with conn.transaction(), conn.cursor() as cursor:
+        cursor.execute("select count(*) from audit.pipeline_runs")
+        assert cursor.fetchone()[0] == before
+
+
+def test_this_module_covers_every_declared_extract() -> None:
+    """Guards against the list being hardcoded again.
+
+    Tautological while LOAD_ORDER is derived, and that is the point: it is
+    insurance against a future edit that replaces the derivation with a literal
+    list, which is exactly how this module came to cover eight of eighteen
+    sources. The assertions in this file compare against LOAD_ORDER, so a short
+    list cannot fail on its own -- it just quietly tests less.
+    """
+    from generator import dataset
+
+    missing = sorted(set(dataset.LOAD_ORDER) - set(LOAD_ORDER))
+    assert not missing, (
+        f"extract(s) the loader produces but this module never loads: {missing}. "
+        "Derive LOAD_ORDER from generator.dataset.LOAD_ORDER rather than listing it."
+    )
+    unknown = sorted(set(LOAD_ORDER) - set(dataset.LOAD_ORDER))
+    assert not unknown, f"extract(s) tested here that the generator does not produce: {unknown}"

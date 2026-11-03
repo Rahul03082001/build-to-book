@@ -250,3 +250,26 @@ def test_a_pending_control_has_no_check(matrix: dict[str, dict[str, str]]) -> No
             assert control_id not in implemented, (
                 f"{control_id} is described as pending but a check is registered for it"
             )
+
+
+def test_ctrl_002_covers_every_fact_table() -> None:
+    """A new fact table must be added to CTRL-002, or it has no completeness check.
+
+    CTRL-002 names its sources one by one in SQL. That is readable, but it means
+    a fact table added later is silently uncovered -- and an uncovered fact
+    table looks exactly like a covered one from the control report, which lists
+    only what it checked. The same drift class as a matrix row that still says
+    "Phase 4" while the control runs.
+    """
+    marts = (
+        pathlib.Path(__file__).resolve().parent.parent / "warehouse" / "dbt" / "models" / "marts"
+    )
+    facts = sorted(path.stem for path in marts.glob("fct_*.sql"))
+    assert facts, "no fact models found, so this test is not looking where it thinks"
+
+    sql = checks.RAW_TO_MART_COMPLETENESS.sql
+    uncovered = [fact for fact in facts if fact not in sql]
+    assert not uncovered, (
+        f"fact table(s) with no CTRL-002 row: {uncovered}. Add them to "
+        "RAW_TO_MART_COMPLETENESS or they have no raw-to-mart completeness check."
+    )

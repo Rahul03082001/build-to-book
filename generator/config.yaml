@@ -97,6 +97,17 @@ domain:
   # headline KPIs and are meaningless at zero.
   inventory_retention: 0.18
 
+  # Share of inbound deliveries that arrive after the date the supplier
+  # promised on the ASN. Here rather than in shipments.py because supplier
+  # on-time delivery is a Phase 3 KPI (BTB-44): a reviewer has to be able to
+  # see what the generator assumes without reading the generator.
+  #
+  # A first attempt drew the transit slip from a uniform window of -1..+6 days,
+  # which put on-time delivery at 24% -- worse than a coin flip, and no
+  # manufacturer would recognise it. Late arrivals are the exception; the
+  # distribution has to say so.
+  supplier_late_delivery_rate: 0.12
+
 # ---------------------------------------------------------------------------
 # Period close. Postings dated into a closed period are a control violation,
 # not a data quirk -- see the backdated_gl_posting defect.
