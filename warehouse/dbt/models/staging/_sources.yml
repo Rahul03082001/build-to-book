@@ -120,6 +120,60 @@ sources:
           - name: amount_usd
             description: Valued at the standard cost in force on the posting date.
             data_tests: [not_null]
+          - name: inbound_delivery
+            description: >
+              The inbound delivery this receipt arrived on (ADR-026). Null on
+              issues, which have no supplier shipment, and null on a receipt
+              whose purchase order does not exist. Because those nulls are
+              legitimate, a missing stamp would be indistinguishable from them
+              -- the generator raises instead, and a dbt test asserts every
+              receipt with a known purchase order names a delivery.
+
+      - name: shipment_headers
+        description: >
+          Inbound deliveries, shaped on SAP's LIKP. One row per advance ship
+          notice. An ASN is a promise that arrives before the goods do, so the
+          receipt records the delivery rather than the other way round
+          (ADR-026).
+        columns:
+          - name: inbound_delivery
+            data_tests: [unique, not_null]
+          - name: supplier_number
+            description: >
+              Not tested for null here on purpose. The
+              `missing_supplier_on_shipment` defect nulls it so CTRL-009 can
+              detect it; a not_null test would fail the build before the
+              control ever ran, and the control would have nothing to find.
+          - name: shipped_date
+            data_tests: [not_null]
+          - name: promised_arrival_date
+            description: Ship date plus the carrier's planned transit.
+            data_tests: [not_null]
+          - name: arrived_date
+            description: Null while the shipment is in transit.
+          - name: status
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["RECEIVED", "IN_TRANSIT"]
+
+      - name: shipment_lines
+        description: >
+          Inbound delivery items, shaped on SAP's LIPS. One row per purchase
+          order line per delivery -- two receipt splits of one order line on
+          one delivery are merged, so (delivery, po_number, po_item) is unique
+          and a shipped-versus-received reconciliation has a key to join on.
+        columns:
+          - name: inbound_delivery
+            data_tests: [not_null]
+          - name: shipment_item
+            data_tests: [not_null]
+          - name: po_number
+            data_tests: [not_null]
+          - name: quantity_shipped
+            description: A count of goods on a truck, so never negative.
+            data_tests: [not_null]
 
       - name: supplier_invoice_headers
         description: >

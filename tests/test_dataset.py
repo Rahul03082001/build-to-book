@@ -346,13 +346,79 @@ def test_adding_bom_extracts_did_not_change_the_inventory_data(
     inventory_only = inventory.InventoryGenerator(cfg, "demo").generate()
 
     for name in inventory_only.as_mapping():
-        composed = writers.write_extract(
-            dataset.EXTRACT_SPECS[name], data.as_mapping()[name], tmp_path / "composed", STAMP
+        stamped = dataset.STAMPED_COLUMNS.get(name, ())
+        composed_rows = data.as_mapping()[name]
+        alone_rows = inventory_only.as_mapping()[name]
+        assert len(composed_rows) == len(alone_rows), (
+            f"{name} has {len(composed_rows)} rows composed and {len(alone_rows)} alone"
         )
-        alone = writers.write_extract(
-            inventory.EXTRACT_SPECS[name],
-            inventory_only.as_mapping()[name],
-            tmp_path / "alone",
-            STAMP,
-        )
-        assert composed.sha256 == alone.sha256, f"{name} changed when the BOM generator was added"
+
+        if not stamped:
+            # Byte comparison where nothing downstream touches the extract.
+            composed = writers.write_extract(
+                dataset.EXTRACT_SPECS[name], composed_rows, tmp_path / "composed", STAMP
+            )
+            alone = writers.write_extract(
+                inventory.EXTRACT_SPECS[name], alone_rows, tmp_path / "alone", STAMP
+            )
+            assert composed.sha256 == alone.sha256, (
+                f"{name} changed when the BOM generator was added"
+            )
+            continue
+
+        # `goods_movements` carries `inbound_delivery`, which a later generator
+        # fills in (ADR-026), so the bytes legitimately differ in that column
+        # and only there. Comparing every OTHER column still answers the
+        # question this test asks -- did adding later generators disturb the
+        # random state the inventory data depends on -- and comparing the whole
+        # row would answer a different, now-false question.
+        for index, (composed_row, alone_row) in enumerate(
+            zip(composed_rows, alone_rows, strict=True)
+        ):
+            trimmed_composed = {k: v for k, v in composed_row.items() if k not in stamped}
+            trimmed_alone = {k: v for k, v in alone_row.items() if k not in stamped}
+            assert trimmed_composed == trimmed_alone, (
+                f"{name} row {index} changed when later generators were added, "
+                f"in a column none of them is declared to stamp"
+            )
+            # And the stamped column must actually be unset before stamping,
+            # or "stamped later" is not what is happening.
+            for column in stamped:
+                assert alone_row[column] is None, (
+                    f"{name} row {index} already has {column} set before the "
+                    "generator that stamps it has run"
+                )
+
+
+def test_stamped_columns_are_real_columns_of_their_extract() -> None:
+    """A declared stamped column must exist, or the declaration hides nothing.
+
+    `STAMPED_COLUMNS` is what lets the order-independence test above ignore a
+    legitimate difference. A typo in it would silently widen that exemption to
+    a column nobody is actually stamping, which is exactly the kind of quiet
+    loosening that makes a test agree with the code instead of with reality.
+    """
+    for name, columns in dataset.STAMPED_COLUMNS.items():
+        assert name in dataset.EXTRACT_SPECS, f"{name} is not a declared extract"
+        declared = set(dataset.EXTRACT_SPECS[name].columns)
+        unknown = sorted(set(columns) - declared)
+        assert not unknown, f"{name} declares stamped column(s) it does not have: {unknown}"
+
+
+def test_a_stamped_column_is_populated_by_the_end_of_a_full_build(
+    cfg: genconfig.GeneratorConfig,
+) -> None:
+    """The other direction: the stamp must actually happen.
+
+    Emitting None and declaring it stamped would otherwise be enough to satisfy
+    everything above while the value was never written -- the extract would load
+    cleanly with a null column and the only symptom would be an empty join.
+    """
+    data, _ = dataset.build(cfg, "demo")
+    for name, columns in dataset.STAMPED_COLUMNS.items():
+        rows = data.as_mapping()[name]
+        for column in columns:
+            populated = sum(1 for row in rows if row[column] is not None)
+            assert populated > 0, (
+                f"{name}.{column} is declared stamped but no row has a value after a full build"
+            )

@@ -121,6 +121,10 @@ data-defects: ## Generate extracts with every implemented defect planted
 load: ## Validate and incrementally load extracts into raw
 	$(PY) -m ingestion --data-dir $(or $(DATA_DIR),data)
 
+.PHONY: reload
+reload: ## Empty raw and load from scratch -- needed when an extract gains a column
+	$(PY) -m ingestion --data-dir $(EXTRACT_DIR) --reset
+
 .PHONY: audit-schema
 audit-schema: ## Create the append-only audit tables
 	@scripts/psql.sh -q -f - < warehouse/sql/audit.sql

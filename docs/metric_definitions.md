@@ -85,7 +85,7 @@ above before it can be called certified.
 | WIP units and cycle time | 3 | BTB-44 | At a point in time, how many units are between first and last step? Is cycle time measured per unit or per order, and does burn-in dwell count? |
 | Inventory aging | 3 | BTB-44 | How long has on-hand material been held? Measured from receipt date, FIFO-assumed even though valuation is standard cost — an assumption to state explicitly. |
 | Purchase price variance | 3 | BTB-44 | Invoice price versus standard or PO price? Recognised at receipt or at invoice? |
-| Supplier on-time delivery | 3 | BTB-44 | Promised versus actual date — and is "on time" exact, or within a tolerance window? Measured by line or by shipment? |
+| Supplier on-time delivery | 3 | BTB-44 | Promised versus actual date — and is "on time" exact, or within a tolerance window? Measured by line or by shipment? Against the ASN's promise or the purchase order's agreed date? **The data to answer this now exists** (BTB-34): `int_inbound_delivery_performance` carries `days_late_versus_promise` and `days_late_versus_order` at delivery-line grain, so all four groupings are computable. It deliberately publishes no on-time flag. On the demo profile the choice is not cosmetic: exact gives 87.6% and a two-day window gives 90.2%. |
 | Standard versus actual cost variance | 3 | BTB-44 | Split into price, quantity, and mix variance, or reported as a single figure? |
 | COGS | 3 | BTB-44 | Recognised at goods issue or at shipment? This interacts with the conflict below. |
 

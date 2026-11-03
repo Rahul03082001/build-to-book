@@ -43,6 +43,7 @@ SOX-style controls. Nothing here claims SOX compliance (ADR-019).
 | [ADR-023](#adr-023-post-a-revaluation-when-a-standard-cost-changes) | 2026-11-02 | Post a revaluation when a standard cost changes | Accepted |
 | [ADR-024](#adr-024-keep-every-extract-as-csv-even-at-five-million-rows) | 2026-11-02 | Keep every extract as CSV, even at five million rows | Accepted |
 | [ADR-025](#adr-025-explode-the-bom-in-dbt-not-in-the-generator) | 2026-11-02 | Explode the BOM in dbt, not in the generator | Accepted |
+| [ADR-026](#adr-026-record-the-inbound-delivery-on-the-goods-receipt) | 2026-11-02 | Record the inbound delivery on the goods receipt | Accepted |
 
 ---
 
@@ -1879,3 +1880,94 @@ hanging a nightly run.
 it. `int_bom_exploded` holds the recursion, and dbt tests assert no cycles, a
 bounded depth, and that exploding a known rack configuration yields the
 component quantities the generator put in.
+
+## ADR-026: Record the inbound delivery on the goods receipt
+
+- Date: 2026-11-02
+- Status: Accepted
+- Jira: BTB-34 | PR/commit: BTB-34-shipments-and-asns
+- Area: Data
+
+### Context
+
+Inbound shipments and advance ship notices need to arrive as a source system,
+and the story requires that an ASN **precede** the receipt it becomes. That is
+only checkable if the two can be tied together, and there is more than one way
+to tie them.
+
+Partial deliveries already happen: about 22% of receipted purchase order lines
+are split across two material documents. So a purchase order line is not a
+unique handle on "the shipment" — one line can legitimately have two.
+
+### Options considered
+
+1. **Shipment header and lines, with an `inbound_delivery` column added to
+   `goods_movements`.** Shaped on SAP's LIKP/LIPS, and a real MSEG line does
+   carry the inbound delivery it was received against. The ASN-to-receipt link
+   becomes a keyed join, so precedence is asserted per row. Costs a new column
+   on an existing extract, its raw table and its staging model.
+
+2. **Flat shipment lines, nothing added to `goods_movements`.** Smallest
+   footprint and no risk to an extract that is already tested. But the link is
+   inferred from the purchase order line plus date ordering, which is ambiguous
+   exactly where partial deliveries occur — so "ASNs precede their receipts"
+   weakens from a keyed assertion to a comparison of aggregates.
+
+3. **Invert the causality: generate ASNs first and derive receipts from them.**
+   Precedence becomes true by construction rather than by assertion, which is
+   the strongest form available. But it refactors receipt generation that is
+   already verified, so inventory balances, GL postings and the three-way match
+   figures would all move, and every number currently published would need
+   re-earning.
+
+### Decision
+
+Option 1. Shipment headers and lines as their own extracts, and
+`goods_movements` gains a nullable `inbound_delivery` that is populated on
+receipts (movement type 101) and null on issues (261), because an issue to a
+production order has no inbound delivery.
+
+### Reasons
+
+It matches the source system's real shape, which ADR-002 commits to, and a
+reviewer who knows SAP will recognise it.
+
+It makes the invariant keyed rather than inferential. "Every ASN ships before
+the receipt it becomes" is then a per-row assertion with a named counterexample
+when it fails, instead of a comparison of minimums that can hide an individual
+violation inside a correct aggregate — the same failure mode as reconciling a
+grand total while two orders offset each other (ADR-001's amendment, CTRL-005).
+
+It adds a column rather than changing data, so every figure already published
+stays exactly as it was. Option 3 is better modelling and was rejected only on
+that cost: moving verified numbers to improve a property that Option 1 can
+assert anyway is a poor trade. If receipt generation is ever rewritten for
+another reason, Option 3 becomes the better shape and this entry should be
+superseded rather than edited.
+
+### Consequences
+
+Easier: the ASN-to-receipt relationship is explicit, so delivery performance
+joins on a key; an in-transit ASN is simply one with no matching receipt, which
+is a legitimate open balance rather than a defect; and a future control for
+"received without an ASN" has something to key on.
+
+Harder: `inbound_delivery` is nullable, so every model touching it must say
+what null means rather than assuming it. Nullability is the price of one column
+serving both movement types, and the alternative — a separate receipt extract —
+would split a grain that SAP keeps together.
+
+Because the column is nullable, a test asserts it is populated on **every**
+receipt and null on **every** issue. A nullable column with no such test would
+let a silent population failure look like legitimate nulls.
+
+### How a reviewer can verify it
+
+`raw.shipment_headers` and `raw.shipment_lines` hold the ASNs;
+`raw.goods_movements.inbound_delivery` holds the link.
+`int_inbound_delivery_performance` joins them and exposes `days_late` without
+declaring an on-time threshold — that definition is BTB-44's, and
+docs/metric_definitions.md records the open questions it must answer. Tests
+assert that every receipt names a delivery, that every delivery ships before
+its receipt posts, and that shipped quantities tie to received quantities per
+delivery line.

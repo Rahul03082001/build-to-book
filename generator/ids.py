@@ -96,6 +96,11 @@ def revaluation_document_numbers() -> NumberRange:
     return NumberRange(prefix="52", width=10)
 
 
+def inbound_delivery_numbers() -> NumberRange:
+    """Inbound deliveries occupy 18xxxxxxxx, as SAP's LIKP does."""
+    return NumberRange(prefix="18", width=10)
+
+
 def material_numbers() -> NumberRange:
     """Numeric material numbers from 1000000, as an SAP material master uses."""
     return NumberRange(prefix="", width=7, start=1_000_000)

@@ -20,7 +20,7 @@ import pathlib
 from collections.abc import Sequence
 from typing import Any
 
-from generator import bom, defects, inventory, invoices, mes, production, writers
+from generator import bom, defects, inventory, invoices, mes, production, shipments, writers
 from generator.config import GeneratorConfig
 from generator.writers import ExtractSpec
 
@@ -34,6 +34,13 @@ EXTRACT_SPECS: dict[str, ExtractSpec] = {
     "bom_items": bom.EXTRACT_SPECS["bom_items"],
     "purchase_order_headers": inventory.EXTRACT_SPECS["purchase_order_headers"],
     "purchase_order_lines": inventory.EXTRACT_SPECS["purchase_order_lines"],
+    # Before goods_movements: a receipt references the delivery it arrived on
+    # (ADR-026), so the deliveries have to be present when the movements land.
+    # Generation order is the reverse -- deliveries are derived from the
+    # receipts -- which is why load order and generation order are separate
+    # concerns.
+    "shipment_headers": shipments.EXTRACT_SPECS["shipment_headers"],
+    "shipment_lines": shipments.EXTRACT_SPECS["shipment_lines"],
     "goods_movements": inventory.EXTRACT_SPECS["goods_movements"],
     "supplier_invoice_headers": invoices.EXTRACT_SPECS["supplier_invoice_headers"],
     "supplier_invoice_lines": invoices.EXTRACT_SPECS["supplier_invoice_lines"],
@@ -62,6 +69,23 @@ STREAMED: frozenset[str] = frozenset({"mes_unit_events"})
 #: asserts the ordering, because reversing it would silently produce empty
 #: confirmations.
 DEFERRED: frozenset[str] = frozenset({"production_confirmations"})
+
+#: Columns a generator emits as None and a LATER generator fills in.
+#:
+#: `goods_movements` is produced by the inventory generator, but
+#: `inbound_delivery` can only be known once the shipments are derived from
+#: those same receipts (ADR-026). The producing generator emits None so its
+#: output still satisfies its declared spec, and the shipment generator
+#: overwrites it.
+#:
+#: Declared here rather than left as knowledge inside two modules, because a
+#: test comparing an extract generated alone against the same extract
+#: generated in a full run has to know which columns are legitimately
+#: different. Without this it would either fail (as it did) or be weakened to
+#: ignore all differences.
+STAMPED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "goods_movements": ("inbound_delivery",),
+}
 
 LOAD_ORDER: tuple[str, ...] = tuple(EXTRACT_SPECS)
 
@@ -197,6 +221,20 @@ def build(
     )
     production_data = production_generator.generate()
 
+    # Shipments come from the receipts that already exist, and stamp
+    # `inbound_delivery` onto those movement rows in place (ADR-026). Derived
+    # rather than generated independently so shipped quantity ties to received
+    # quantity exactly, and so there is no second row count to disagree with
+    # the first -- the fault `mes.order_quantity_for_profile` exists to prevent.
+    shipment_outcome = shipments.build(
+        config=config,
+        movements=inventory_data.goods_movements,
+        po_headers=inventory_data.purchase_order_headers,
+        po_lines=inventory_data.purchase_order_lines,
+        period_start=generator.start,
+        period_end=generator.end,
+    )
+
     # One mapping per source system, merged in LOAD_ORDER. Building the dict
     # by iterating LOAD_ORDER rather than by merging means an extract declared
     # in the order but produced by nobody raises here instead of silently
@@ -236,6 +274,8 @@ def build(
     )
 
     produced: dict[str, list[dict[str, Any]]] = {
+        "shipment_headers": shipment_outcome.headers,
+        "shipment_lines": shipment_outcome.lines,
         **inventory_data.as_mapping(),
         **bom_data.as_mapping(),
         **invoice_data.as_mapping(),

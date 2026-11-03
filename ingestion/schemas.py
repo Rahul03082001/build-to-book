@@ -42,6 +42,11 @@ _SHA256 = r"^[0-9a-f]{64}$"
 # sign of zero in the mart and silently drop out of the balance.
 _MOVEMENT_TYPES = ["101", "261"]
 
+#: Inbound delivery statuses. RECEIVED means a goods receipt exists against
+#: it; IN_TRANSIT means the shipment is still on the water at period end,
+#: which is an open commitment rather than a missing receipt (ADR-026).
+_SHIPMENT_STATUSES = ["RECEIVED", "IN_TRANSIT"]
+
 _DEBIT_CREDIT = ["S", "H"]
 
 
@@ -390,10 +395,59 @@ SCHEMAS: dict[str, DataFrameSchema] = {
             "po_number": _text(nullable=True),
             "po_item": _nullable_positive_int(),
             "entered_by": _code(),
+            # The inbound delivery this receipt arrived on (ADR-026). Null on
+            # issues, which have no supplier shipment, and null on a receipt
+            # whose purchase order does not exist -- the `receipt_without_po`
+            # defect plants exactly that, and it has to load so CTRL-004 can
+            # find it. Because those nulls are legitimate, a *missing* stamp
+            # would look identical to them, so the generator raises rather
+            # than relying on validation here (see shipments.py).
+            "inbound_delivery": _text(nullable=True),
         },
         strict=True,
         coerce=True,
         name="goods_movements",
+    ),
+    "shipment_headers": DataFrameSchema(
+        {
+            "inbound_delivery": _code(),
+            # Populated on every row when defects are off. The
+            # `missing_supplier_on_shipment` defect nulls it, which is what
+            # CTRL-009 detects -- so this column is nullable in the schema and
+            # asserted non-null by a test on clean data. Validating it here
+            # instead would reject the defect at the door and the control would
+            # have nothing to find.
+            "supplier_number": _text(nullable=True),
+            "carrier_code": _code(),
+            "carrier_name": _text(),
+            "shipped_date": _date(),
+            # The supplier's own commitment, not the purchase order's.
+            "promised_arrival_date": _date(),
+            # Null while the shipment is in transit.
+            "arrived_date": _date(nullable=True),
+            "planned_transit_days": _positive_int(),
+            "status": _code(_SHIPMENT_STATUSES),
+            "total_quantity_shipped": _positive_int(),
+        },
+        strict=True,
+        coerce=True,
+        name="shipment_headers",
+    ),
+    "shipment_lines": DataFrameSchema(
+        {
+            "inbound_delivery": _code(),
+            "shipment_item": _positive_int(),
+            "po_number": _code(),
+            "po_item": _positive_int(),
+            "material_number": _code(),
+            # A count of things on a truck, so never negative and never zero --
+            # unlike a movement quantity, which is signed by movement type.
+            "quantity_shipped": _positive_int(),
+            "uom": _code(),
+        },
+        strict=True,
+        coerce=True,
+        name="shipment_lines",
     ),
     "inventory_revaluations": DataFrameSchema(
         {
@@ -473,6 +527,8 @@ NATURAL_KEYS: dict[str, tuple[str, ...]] = {
     "purchase_order_lines": ("po_number", "po_item"),
     # Material document numbers repeat across fiscal years (ADR-020).
     "goods_movements": ("material_document", "fiscal_year", "material_document_item"),
+    "shipment_headers": ("inbound_delivery",),
+    "shipment_lines": ("inbound_delivery", "shipment_item"),
     "inventory_revaluations": ("revaluation_document", "fiscal_year"),
     "gl_postings": ("accounting_document", "fiscal_year", "line_item"),
 }

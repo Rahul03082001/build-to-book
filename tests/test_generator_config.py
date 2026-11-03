@@ -167,3 +167,21 @@ def test_freshness_window_declared_for_every_stale_checkable_source(
     assert stale_target in cfg.freshness_hours, (
         f"stale_extract targets {stale_target!r}, which has no freshness window"
     )
+
+
+def test_the_supplier_late_delivery_rate_is_declared_and_plausible(
+    cfg: genconfig.GeneratorConfig,
+) -> None:
+    """Supplier on-time delivery is a Phase 3 KPI, so its assumption is config.
+
+    Held here rather than in shipments.py so a reviewer can see what the
+    generator assumes without reading the generator -- and so a value that
+    would make the figure implausible fails at commit time. The first attempt
+    put on-time delivery at 24%, which no manufacturer would recognise.
+    """
+    rate = cfg.domain["supplier_late_delivery_rate"]
+    assert isinstance(rate, float), "the late-delivery rate must be a fraction, not a percentage"
+    assert 0.0 < rate < 0.5, (
+        f"a {rate:.0%} late rate means on-time delivery is {1 - rate:.0%}, which is "
+        "not a supply chain worth reporting on"
+    )
