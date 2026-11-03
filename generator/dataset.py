@@ -23,6 +23,7 @@ from typing import Any
 from generator import (
     accounts,
     bom,
+    costing,
     defects,
     inventory,
     invoices,
@@ -227,6 +228,36 @@ def build(
     )
     bom_data = bom_generator.generate()
 
+    # A manufactured material's standard cost is the sum of what goes into it,
+    # not an independent price. Rolled up now that the bills of materials
+    # exist, and written back over whatever the master drew for racks and
+    # trays -- rack 1000008 was carrying 8,461 against a BOM worth 1,161,502.
+    #
+    # It did not matter while production was invisible to finance. ADR-028 puts
+    # finished goods on the balance sheet, and then the general ledger and
+    # CTRL-003's quantity-times-cost invariant would compute inventory from two
+    # different numbers.
+    standard_cost_rows, cost_lookup = generator.standard_costs(materials)
+    rolled = costing.roll_up(
+        bom_headers=bom_data.headers,
+        bom_items=bom_data.items,
+        component_cost={
+            row["material_number"]: row["standard_cost_usd"] for row in standard_cost_rows
+        },
+    )
+    # Mutates both in place, so every later valuation -- movements, postings,
+    # the inventory balance -- reads the same number. Two sources of truth for
+    # a standard cost is how the ledger and the quantity-times-cost invariant
+    # come to disagree.
+    costing.apply_to_standard_costs(
+        standard_costs=standard_cost_rows,
+        rolled=rolled,
+        cost_lookup=cost_lookup,
+        period_start=generator.start,
+        currency=config.domain["currency"],
+        approved_by="COSTING",
+    )
+
     production_generator = production.ProductionGenerator(
         bom_headers=bom_data.headers,
         bom_items=bom_data.items,
@@ -277,7 +308,15 @@ def build(
 
     # Procurement and the material ledger, now that demand is known. The goods
     # issues in here ARE production_data.consumption.
-    inventory_data = generator.generate(demand=demand, consumption=production_data.consumption)
+    # Materials the factory builds rather than buys, so purchasing excludes
+    # them (see `purchase_orders`).
+    manufactured = frozenset(header["material_number"] for header in bom_data.headers)
+
+    inventory_data = generator.generate(
+        demand=demand,
+        consumption=production_data.consumption,
+        manufactured=manufactured,
+    )
 
     # Refuses a negative balance rather than clamping the issues. Demand is
     # fixed by the bill of materials, so stock running out is a configuration

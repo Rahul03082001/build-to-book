@@ -651,6 +651,7 @@ class InventoryGenerator:
         materials: Sequence[dict[str, Any]],
         suppliers: Sequence[dict[str, Any]],
         demand: dict[str, int] | None = None,
+        manufactured: frozenset[str] = frozenset(),
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Purchase order headers and lines, in SAP's header/line split.
 
@@ -740,13 +741,29 @@ class InventoryGenerator:
                     }
                 )
 
-        # --- fill the rest with materials production never consumes ---
-        # Racks themselves, and anything not on a released bill of materials.
-        # Bought in small quantities so the purchasing data is not limited to
-        # what the factory happens to build.
-        other = [m["material_number"] for m in materials if m["material_number"] not in demand]
-        while len(planned) < target_lines and other:
-            material_number = other[int(self.rng.integers(0, len(other)))]
+        # --- fill the rest with other bought materials ---
+        # Anything not on a released bill of materials, bought in small
+        # quantities so the purchasing data is not limited to what the factory
+        # happens to build.
+        #
+        # MANUFACTURED materials are excluded: you do not buy what you build.
+        # They used to land here, because a rack is not a component so it never
+        # appeared in demand -- and once BTB-35 rolled up their standard costs,
+        # 119 lines were buying racks and trays for $17.0M at purchase prices
+        # while the same receipts were valued at standard cost for $1.25B. The
+        # supplier would be owed one figure and inventory would carry a figure
+        # 73 times larger, with the difference sitting in GR/IR.
+        other = [
+            m["material_number"]
+            for m in materials
+            if m["material_number"] not in demand and m["material_number"] not in manufactured
+        ]
+        # Falls back to demand materials once the others run out, rather than
+        # ending up with fewer purchase order lines than the profile declares:
+        # a component is bought repeatedly, which is realistic anyway.
+        fill_pool = other or [m for m in materials if m["material_number"] in demand]
+        while len(planned) < target_lines and fill_pool:
+            material_number = fill_pool[int(self.rng.integers(0, len(fill_pool)))]
             po_date = self._date_between(self.start, order_last)
             planned.append(
                 {
@@ -1286,6 +1303,7 @@ class InventoryGenerator:
         self,
         demand: dict[str, int] | None = None,
         consumption: Sequence[dict[str, Any]] = (),
+        manufactured: frozenset[str] = frozenset(),
     ) -> InventoryData:
         """Generate every inventory extract, in a fixed order.
 
@@ -1306,7 +1324,7 @@ class InventoryGenerator:
         materials = self.materials()
         suppliers = self.suppliers()
         standard_costs, cost_lookup = self.standard_costs(materials)
-        headers, lines = self.purchase_orders(materials, suppliers, demand)
+        headers, lines = self.purchase_orders(materials, suppliers, demand, manufactured)
         movements = self.goods_movements(lines, cost_lookup, consumption)
         revaluations = self.inventory_revaluations(movements, cost_lookup)
         postings = self.gl_postings(movements, revaluations)

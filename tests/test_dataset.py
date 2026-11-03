@@ -15,6 +15,7 @@ import filecmp
 import json
 import pathlib
 import resource
+from typing import Any
 
 import pytest
 
@@ -360,7 +361,44 @@ def test_the_master_data_is_independent_of_the_generators_that_follow_it(
 
     assert extracts["materials"] == materials
     assert extracts["suppliers"] == suppliers
-    assert extracts["standard_costs"] == standard_costs
+
+    # Standard costs are the exception, and deliberately so. A manufactured
+    # material's cost is not a negotiated price but the sum of what goes into
+    # it, so BTB-35 rolls it up once the bills of materials exist and writes it
+    # back over whatever the master drew -- rack 1000008 was carrying 8,461
+    # against a BOM worth 1,163,783. Every OTHER material's cost must still be
+    # untouched, or something downstream is reaching back into the master.
+    manufactured = {header["material_number"] for header in extracts["bom_headers"]}
+    assert manufactured, "no manufactured materials, so the exemption proves nothing"
+
+    def windows(rows: list[dict[str, Any]]) -> dict[str, list[tuple[Any, Any, Any]]]:
+        by_material: dict[str, list[tuple[Any, Any, Any]]] = {}
+        for row in rows:
+            by_material.setdefault(row["material_number"], []).append(
+                (row["valid_from"], row["valid_to"], row["standard_cost_usd"])
+            )
+        return by_material
+
+    drawn = windows(standard_costs)
+    final = windows(extracts["standard_costs"])
+
+    for material, drawn_windows in drawn.items():
+        if material in manufactured:
+            continue
+        assert final.get(material) == drawn_windows, (
+            f"{material} is bought, not built, but its standard cost changed "
+            "after the master was drawn"
+        )
+
+    # And the roll-up must have actually happened, or the exemption above is
+    # excusing nothing and would hide a real drift.
+    for material in sorted(manufactured):
+        assert len(final[material]) == 1, (
+            f"{material} should carry one rolled-up window, not {len(final[material])}"
+        )
+        assert final[material] != drawn.get(material), (
+            f"{material} is manufactured but its cost was not rolled up"
+        )
 
 
 def test_the_masters_are_memoised_so_asking_twice_is_the_same_answer(
