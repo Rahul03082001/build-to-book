@@ -150,6 +150,14 @@ jobs:
       - name: Generate the demo profile
         run: make data
 
+      # Before `make load`, not after: an extract that fails its own
+      # invariants should never reach the warehouse. The loader's control
+      # totals compare the file against its sidecar, and both are written by
+      # the same pass -- so they agree with each other whether or not the
+      # data is right. This recomputes the invariants from the file instead.
+      - name: Verify the MES extract
+        run: make verify-mes
+
       - name: Load into raw
         run: make load
 

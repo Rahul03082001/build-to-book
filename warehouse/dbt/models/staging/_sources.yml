@@ -180,6 +180,35 @@ sources:
           - name: quantity_consumed
             data_tests: [not_null]
 
+      - name: mes_unit_events
+        description: >
+          Unit-level test events. One row per serial per step attempt -- the
+          grain the whole MES story rests on. A failure sends the unit back for
+          rework up to the configured limit, after which it is scrapped.
+        columns:
+          - name: serial_number
+            data_tests: [not_null]
+          - name: order_number
+            description: Every serial belongs to a production order, so MES and ERP reconcile.
+            data_tests: [not_null]
+          - name: result
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["PASS", "FAIL"]
+
+      - name: production_confirmations
+        description: >
+          How many units an order completed and scrapped. Derived from the MES
+          outcome rather than generated independently, so CTRL-005 reconciles
+          exactly on a clean run.
+        columns:
+          - name: order_number
+            data_tests: [not_null]
+          - name: confirmed_quantity
+            data_tests: [not_null]
+
       - name: inventory_revaluations
         description: >
           Value-only entries posted when a standard cost changes (ADR-023).

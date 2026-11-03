@@ -17,7 +17,7 @@ import sys
 
 from generator import config as genconfig
 from generator import dataset as dataset_module
-from generator import defects, writers
+from generator import defects
 
 BANNER = "SYNTHETIC DATA -- simulated, SOX-style controls. Not SOX compliant."
 
@@ -100,17 +100,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"{'extract':28}{'rows':>8}  {'value total':>20}  sha256")
     print("-" * 86)
-    written: list[writers.WrittenExtract] = []
-    for name, rows in data.as_mapping().items():
-        result = writers.write_extract(
-            spec=dataset_module.EXTRACT_SPECS[name],
-            rows=rows,
-            out_dir=out_dir,
-            generated_at=generated_at,
-        )
-        written.append(result)
+    written = dataset_module.write_all(data, out_dir, generated_at)
+    for result in written:
         total = f"{result.value_total:,}" if result.value_total is not None else "-"
-        print(f"{name:28}{result.row_count:>8}  {total:>20}  {result.sha256[:12]}")
+        print(f"{result.spec.name:28}{result.row_count:>8}  {total:>20}  {result.sha256[:12]}")
 
     print("-" * 86)
     print(f"{'total':28}{sum(w.row_count for w in written):>8}")

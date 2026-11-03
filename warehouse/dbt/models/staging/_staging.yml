@@ -453,3 +453,78 @@ models:
             expression: "signed_amount_usd = -amount_usd"
             config:
               where: "posting_direction = 'CREDIT'"
+
+  - name: stg_mes_unit_events
+    description: >
+      GRAIN: one row per serial per step attempt. The grain the whole MES story
+      rests on -- 5,000,000 rows on the full profile.
+
+      `passed_first_time` is derived here so first-pass yield means one thing
+      across the warehouse: a reworked unit that later passes is complete but
+      is NOT a first-pass success.
+    columns:
+      - name: serial_number
+        data_tests: [not_null]
+      - name: order_number
+        description: Every serial belongs to an order, so MES and ERP reconcile.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_production_orders')
+                field: order_number
+      - name: result
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["PASS", "FAIL"]
+      - name: passed_first_time
+        data_tests: [not_null]
+      - name: dwell_hours
+        description: Hours on this attempt. Burn-in dominates the route.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [serial_number, step_sequence, attempt]
+      - dbt_utils.expression_is_true:
+          name: event_finishes_after_it_starts
+          arguments:
+            expression: "finished_at >= started_at"
+      # A failure without a code cannot be diagnosed; a pass with one is a
+      # contradiction.
+      - dbt_utils.expression_is_true:
+          name: failures_carry_a_failure_code
+          arguments:
+            expression: "failure_code is not null"
+            config:
+              where: "result = 'FAIL'"
+      - dbt_utils.expression_is_true:
+          name: passes_carry_no_failure_code
+          arguments:
+            expression: "failure_code is null"
+            config:
+              where: "result = 'PASS'"
+
+  - name: stg_production_confirmations
+    description: >
+      GRAIN: one row per confirmation. Derived from the MES outcome, so
+      CTRL-005 reconciles exactly on a clean run.
+    columns:
+      - name: order_number
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_production_orders')
+                field: order_number
+      - name: confirmed_quantity
+        data_tests: [not_null]
+      - name: accounted_quantity
+        description: Confirmed plus scrapped. A unit in neither has vanished.
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_number, confirmation_number]

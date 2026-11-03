@@ -471,6 +471,41 @@ INVOICE_REFERENCES_A_PURCHASE_ORDER = Check(
     """,
 )
 
+# ---------------------------------------------------------------------------
+# CTRL-005: MES versus ERP completion.
+#
+# Production output reported to finance must match what the factory actually
+# built and tested. The two systems count a finished unit at different moments
+# -- MES at final test, ERP at confirmation -- so the gap is the finding.
+#
+# This only works because confirmations are generated FROM the MES outcome
+# (BTB-33). Generating the two independently would leave a clean-run gap made
+# of noise, and a control whose baseline is noise cannot detect a real finding.
+# ---------------------------------------------------------------------------
+MES_TO_ERP_COMPLETION = Check(
+    check_id="CTRL-005",
+    name="Units passing final test match the quantity confirmed in ERP",
+    shape=CheckShape.EXCEPTION,
+    severity=SEVERITY_CRITICAL,
+    rationale=(
+        "Production output reported to finance must match what the factory built and "
+        "tested. A positive gap means units were built and never confirmed -- output "
+        "missing from the figures finance reports."
+    ),
+    sql="""
+        select
+            'order ' || order_number || ' (' || material_number || '): '
+                || completion_status
+                || ' -- MES completed ' || mes_units_completed
+                || ', ERP confirmed ' || erp_units_confirmed
+                || ', gap ' || completion_gap
+                as exception_detail
+        from {intermediate}.int_mes_to_erp_completion
+        where completion_status in ('MES_WITHOUT_CONFIRMATION', 'COMPLETION_GAP')
+        order by abs(completion_gap) desc, order_number
+    """,
+)
+
 #: Checks that run in Phase 1, in the order they are reported.
 #:
 #: CTRL-006 arrived with BTB-27, once the generator emitted `entered_on`. It
@@ -484,6 +519,7 @@ PHASE_1_CHECKS: tuple[Check, ...] = (
     GL_DOCUMENTS_BALANCE,
     THREE_WAY_MATCH,
     INVOICE_REFERENCES_A_PURCHASE_ORDER,
+    MES_TO_ERP_COMPLETION,
     SUBLEDGER_TO_GL,
     INVENTORY_VALUE_AGREES_WITH_COST,
     NO_NEGATIVE_ON_HAND,

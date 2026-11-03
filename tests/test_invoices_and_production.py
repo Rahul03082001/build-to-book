@@ -207,18 +207,28 @@ def test_orders_finish_inside_the_reporting_window(
         assert order["order_date"] <= order["start_date"]
 
 
-def test_confirmations_are_absent_until_mes_exists() -> None:
-    """Deliberately not generated yet (BTB-33).
+def test_confirmations_are_derived_from_mes_not_generated_alongside_it() -> None:
+    """Arrived with BTB-33, and must stay derived rather than independent.
+
+    This replaces a test that asserted confirmations were *absent*, with the
+    reason recorded in the code. That test was not wasted: it pinned a
+    deliberate omission so it could not be quietly forgotten, and it failed the
+    moment the omission was filled -- which is what told me to write this one.
 
     A confirmation records how many units an order completed, and CTRL-005
     compares that against the units MES says passed final test. Generating the
     two independently would leave a gap made of noise, and a control whose
-    clean-run baseline is noise cannot detect a real finding.
+    clean-run baseline is noise cannot detect a real finding. So confirmations
+    are deferred: written only after the MES stream has been consumed, from the
+    outcome it recorded.
     """
-    assert "production_confirmations" not in dataset.LOAD_ORDER
-    assert "production_confirmations" in production.EXTRACT_SPECS, (
-        "the spec should be ready for BTB-33"
+    assert "production_confirmations" in dataset.LOAD_ORDER
+    assert "production_confirmations" in dataset.DEFERRED, (
+        "confirmations must be written after MES, not generated beside it"
     )
+    # Deferred, so it must come after the stream it derives from in load order.
+    order = list(dataset.LOAD_ORDER)
+    assert order.index("mes_unit_events") < order.index("production_confirmations")
     assert hasattr(production.ProductionGenerator, "confirm")
 
 

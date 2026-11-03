@@ -122,3 +122,38 @@ models:
           name: every_po_line_is_classified
           arguments:
             expression: "match_status is not null"
+
+  - name: int_mes_to_erp_completion
+    description: >
+      GRAIN: one row per production order.
+
+      CTRL-005: units MES says passed final test against units ERP confirmed.
+      The two systems count a finished unit at different moments, so the gap
+      is the finding -- which is why this reports the difference rather than
+      asserting equality.
+
+      EVERY order appears, confirmed or not. An order with MES activity and no
+      confirmation is the serious case -- units built and never reported to
+      finance -- and an inner join would hide exactly that.
+    columns:
+      - name: order_number
+        data_tests: [unique, not_null]
+      - name: mes_units_completed
+        data_tests: [not_null]
+      - name: erp_units_confirmed
+        data_tests: [not_null]
+      - name: completion_gap
+        description: >
+          MES completed minus ERP confirmed. Positive means output was built
+          and never confirmed, which is the direction that matters.
+        data_tests: [not_null]
+      - name: completion_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - RECONCILED
+                  - COMPLETION_GAP
+                  - MES_WITHOUT_CONFIRMATION
+                  - NO_MES_ACTIVITY

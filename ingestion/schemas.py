@@ -63,6 +63,30 @@ def _is_iso_date(value: object) -> bool:
     return True
 
 
+def _timestamp(nullable: bool = False) -> Column:
+    """An ISO timestamp, validated as text for the same reason as _date.
+
+    MES events carry a time as well as a date -- burn-in dwell is measured in
+    hours and cycle time is a Phase 3 KPI -- so the column is a timestamp
+    rather than a date. Validated as text and parsed by Postgres, consistently
+    with every other temporal column here.
+    """
+    return Column(
+        str,
+        checks=[pa.Check(_is_iso_timestamp, element_wise=True, name="iso_timestamp")],
+        nullable=nullable,
+        coerce=True,
+    )
+
+
+def _is_iso_timestamp(value: object) -> bool:
+    try:
+        dt.datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
 def _date(nullable: bool = False) -> Column:
     """An ISO date, validated as text rather than coerced to datetime64[ns].
 
@@ -307,6 +331,46 @@ SCHEMAS: dict[str, DataFrameSchema] = {
         coerce=True,
         name="component_consumption",
     ),
+    "mes_unit_events": DataFrameSchema(
+        {
+            "serial_number": _code(),
+            "order_number": _code(),
+            "material_number": _code(),
+            "step_name": _code(["assembly", "firmware_flash", "burn_in", "final_test"]),
+            "step_sequence": _positive_int(),
+            "attempt": _positive_int(),
+            "station": _code(),
+            # Timestamps rather than dates: burn-in dwell is measured in hours
+            # and cycle time is a Phase 3 KPI.
+            "started_at": _timestamp(),
+            "finished_at": _timestamp(),
+            "result": _code(["PASS", "FAIL"]),
+            # Null on a pass. A failure without a code would be undiagnosable.
+            "failure_code": _text(nullable=True),
+            "is_final_attempt": Column(bool, coerce=True),
+            "operator": _code(),
+        },
+        strict=True,
+        coerce=True,
+        name="mes_unit_events",
+    ),
+    "production_confirmations": DataFrameSchema(
+        {
+            "order_number": _code(),
+            "confirmation_number": _code(),
+            # Zero is valid: an order can confirm nothing and scrap
+            # everything, which is itself a finding worth seeing.
+            "confirmed_quantity": Column(int, checks=[pa.Check.ge(0)], coerce=True),
+            "scrap_quantity": Column(int, checks=[pa.Check.ge(0)], coerce=True),
+            "uom": _code(),
+            "confirmation_date": _date(),
+            "posting_date": _date(),
+            "entered_by": _code(),
+        },
+        strict=True,
+        coerce=True,
+        name="production_confirmations",
+    ),
     "goods_movements": DataFrameSchema(
         {
             "material_document": _code(),
@@ -401,6 +465,10 @@ NATURAL_KEYS: dict[str, tuple[str, ...]] = {
     "supplier_invoice_lines": ("invoice_number", "fiscal_year", "invoice_item"),
     "production_orders": ("order_number",),
     "component_consumption": ("order_number", "consumption_item"),
+    # One row per serial per step attempt -- the grain the whole MES story
+    # rests on (fct_unit_test_events in Phase 3).
+    "mes_unit_events": ("serial_number", "step_sequence", "attempt"),
+    "production_confirmations": ("order_number", "confirmation_number"),
     "purchase_order_headers": ("po_number",),
     "purchase_order_lines": ("po_number", "po_item"),
     # Material document numbers repeat across fiscal years (ADR-020).

@@ -15,6 +15,10 @@ SHELL := /bin/bash
 # ---------------------------------------------------------------------------
 PROFILE       ?= demo
 SEED          ?= 20261101
+# Where `make data` writes. Matches generator/config.yaml's output.directory;
+# override to verify an extract generated elsewhere, e.g.
+#   make verify-mes EXTRACT_DIR=/tmp/btb-full
+EXTRACT_DIR   ?= data
 TARGET_SCHEMA ?= reporting
 # Models build here and are swapped into reporting only if every critical
 # check passes (ADR-014, ADR-021).
@@ -150,6 +154,10 @@ build: ## Run dbt build (models + tests) into the candidate schema
 dbt-test: ## Run dbt tests only, without rebuilding
 	BTB_TARGET_SCHEMA=$(CANDIDATE_SCHEMA) $(DBT) test $(DBT_FLAGS) \
 		--vars '{schema_prefix: "$(SCHEMA_PREFIX)"}'
+
+.PHONY: verify-mes
+verify-mes: ## Re-check the MES extract's invariants from the written files
+	$(PY) scripts/verify_mes_extract.py $(EXTRACT_DIR)
 
 .PHONY: controls
 controls: ## Run reconciliations and record results

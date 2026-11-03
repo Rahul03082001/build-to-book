@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import pathlib
 from collections.abc import Sequence
 from typing import Any
 
-from generator import bom, defects, inventory, invoices, production
+from generator import bom, defects, inventory, invoices, mes, production, writers
 from generator.config import GeneratorConfig
 from generator.writers import ExtractSpec
 
@@ -38,18 +39,29 @@ EXTRACT_SPECS: dict[str, ExtractSpec] = {
     "supplier_invoice_lines": invoices.EXTRACT_SPECS["supplier_invoice_lines"],
     "production_orders": production.EXTRACT_SPECS["production_orders"],
     "component_consumption": production.EXTRACT_SPECS["component_consumption"],
+    "mes_unit_events": mes.EXTRACT_SPECS["mes_unit_events"],
+    "production_confirmations": production.EXTRACT_SPECS["production_confirmations"],
     "inventory_revaluations": inventory.EXTRACT_SPECS["inventory_revaluations"],
     "gl_postings": inventory.EXTRACT_SPECS["gl_postings"],
 }
 
-# `production_confirmations` is deliberately absent until BTB-33.
-#
-# A confirmation records how many units an order actually completed, and
-# CTRL-005 compares that against the units MES says passed final test.
-# Generating the two independently would leave a gap made of noise, and a
-# control whose clean-run baseline is noise cannot detect a real finding. So
-# confirmations are generated *from* the MES outcome, which means they arrive
-# with MES. `production.ProductionGenerator.confirm()` is ready for it.
+#: Extracts too large to hold in memory, written by streaming chunks
+#: (ADR-024). `mes_unit_events` is 5,000,000 rows on the full profile, which
+#: measured at ~929 bytes per dict would be about 4.3 GB.
+STREAMED: frozenset[str] = frozenset({"mes_unit_events"})
+
+#: Extracts that cannot be produced until a stream has been consumed.
+#:
+#: A production confirmation records how many units an order completed, which
+#: is only known once MES has recorded the outcome. Generating it independently
+#: would leave CTRL-005 comparing two numbers that differ by noise, and a
+#: control whose clean-run baseline is noise cannot detect a real finding.
+#:
+#: LOAD_ORDER places `mes_unit_events` before `production_confirmations`, so a
+#: writer iterating that order has the outcome by the time it needs it. A test
+#: asserts the ordering, because reversing it would silently produce empty
+#: confirmations.
+DEFERRED: frozenset[str] = frozenset({"production_confirmations"})
 
 LOAD_ORDER: tuple[str, ...] = tuple(EXTRACT_SPECS)
 
@@ -66,12 +78,65 @@ class Dataset:
     #: Production order -> what it plans to build. MES generates serials per
     #: order, so it needs the material, quantity and date window.
     order_plan: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict)
+    #: Extract name -> a callable returning an iterator of row chunks. Held as
+    #: a factory rather than an iterator so it can be consumed more than once
+    #: -- a spent generator would silently write an empty file on a second
+    #: pass.
+    streams: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: What MES recorded, so confirmations derive from it rather than being
+    #: invented alongside it (CTRL-005).
+    mes_outcome: Any = None
+    #: Extract name -> a callable producing its rows, valid only after the
+    #: streams it depends on have been consumed.
+    deferred: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def as_mapping(self) -> dict[str, list[dict[str, Any]]]:
+        """The in-memory extracts only. Streamed ones are in `streams`."""
         return self.extracts
 
     def row_count(self) -> int:
         return sum(len(rows) for rows in self.extracts.values())
+
+
+def write_all(
+    data: Dataset,
+    out_dir: pathlib.Path,
+    generated_at: dt.datetime,
+) -> list[writers.WrittenExtract]:
+    """Write every extract in the dataset, in load order.
+
+    The one place that knows how each kind of source is written: in-memory
+    extracts directly, streamed ones in chunks, deferred ones only after the
+    stream they derive from has been consumed. Iterated in LOAD_ORDER and not
+    over `extracts`, because a deferred extract must come after its stream.
+
+    Shared by the CLI and the test helpers deliberately. They each had their own
+    copy, and the test copy wrote only `as_mapping()` -- so the moment MES
+    became a stream, the helper silently stopped producing two extracts and the
+    loader failed with a missing file. A second copy of this dispatch is a
+    second thing to forget.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[writers.WrittenExtract] = []
+    for name in LOAD_ORDER:
+        spec = EXTRACT_SPECS[name]
+        if name in STREAMED:
+            result = writers.write_extract_streaming(
+                spec=spec,
+                chunks=data.streams[name](),
+                out_dir=out_dir,
+                generated_at=generated_at,
+            )
+        else:
+            rows = data.deferred[name]() if name in DEFERRED else data.as_mapping()[name]
+            result = writers.write_extract(
+                spec=spec,
+                rows=rows,
+                out_dir=out_dir,
+                generated_at=generated_at,
+            )
+        written.append(result)
+    return written
 
 
 def build(
@@ -136,14 +201,66 @@ def build(
     # by iterating LOAD_ORDER rather than by merging means an extract declared
     # in the order but produced by nobody raises here instead of silently
     # missing from the output.
+    # MES events are generated per unit, so the order quantities have to imply
+    # the profile's declared event count. They used to be randint(1, 9), which
+    # produced ~158,000 events against a declared 5,000,000 on the full
+    # profile -- the two config numbers disagreed by a factor of 32 and
+    # nothing checked.
+    units_per_order = mes.order_quantity_for_profile(
+        declared_events=profile.mes_events,
+        order_count=profile.production_orders,
+        step_count=len(config.domain["mes_steps"]),
+        max_rework_attempts=int(config.domain["max_rework_attempts"]),
+        step_failure_rates=[
+            float(step.get("failure_rate", 0.0)) for step in config.domain["mes_steps"]
+        ],
+    )
+    for order in production_data.orders:
+        order["target_quantity"] = units_per_order
+    for plan in production_data.order_plan.values():
+        plan["target_quantity"] = units_per_order
+    # Consumption follows the BOM times the order quantity, so it has to be
+    # rescaled with it or the Phase 3 variance metrics measure the generator.
+    production_generator.rescale_consumption(production_data.consumption, units_per_order)
+
+    mes_generator = mes.MesGenerator(
+        order_plan=production_data.order_plan,
+        steps=config.domain["mes_steps"],
+        failure_codes=config.domain["failure_codes"],
+        max_rework_attempts=int(config.domain["max_rework_attempts"]),
+        # Its own seed, offset from the run's, so the stream is reproducible
+        # across repeated consumption and independent of how many draws the
+        # earlier generators made.
+        seed=config.seed + 1,
+        period_end=generator.end,
+    )
+
     produced: dict[str, list[dict[str, Any]]] = {
         **inventory_data.as_mapping(),
         **bom_data.as_mapping(),
         **invoice_data.as_mapping(),
         **production_data.as_mapping(),
     }
+    streams: dict[str, Any] = {"mes_unit_events": mes_generator.stream}
+
+    deferred: dict[str, Any] = {
+        "production_confirmations": lambda: production_generator.confirm(
+            production_data.orders,
+            mes_generator.outcome.completed_by_order,
+            mes_generator.outcome.scrapped_by_order,
+        )
+    }
+
     extracts: dict[str, list[dict[str, Any]]] = {}
     for name in LOAD_ORDER:
+        if name in STREAMED:
+            if name not in streams:
+                raise KeyError(f"{name} is declared streamed but has no stream")
+            continue
+        if name in DEFERRED:
+            if name not in deferred:
+                raise KeyError(f"{name} is declared deferred but has no producer")
+            continue
         if name not in produced:
             raise KeyError(f"{name} is in LOAD_ORDER but no generator produced it")
         extracts[name] = produced[name]
@@ -153,6 +270,9 @@ def build(
         cost_windows=inventory_data.cost_windows,
         rack_configurations=bom_data.rack_configurations,
         order_plan=production_data.order_plan,
+        streams=streams,
+        mes_outcome=mes_generator.outcome,
+        deferred=deferred,
     )
 
     planted = (

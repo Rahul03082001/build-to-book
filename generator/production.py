@@ -248,6 +248,10 @@ class ProductionGenerator:
                         "consumption_item": position * 10,
                         "component_material_number": component,
                         "quantity_consumed": per_unit * target,
+                        # Kept so the row can be rescaled exactly once the
+                        # order quantity is derived from the MES volume. A
+                        # division would be lossy for a quantity.
+                        "_quantity_per_unit": per_unit,
                         "uom": self.uom,
                         "movement_type": MVT_ISSUE_TO_ORDER,
                         "posting_date": start,
@@ -261,6 +265,21 @@ class ProductionGenerator:
             confirmations=[],
             order_plan=order_plan,
         )
+
+    @staticmethod
+    def rescale_consumption(consumption: list[dict[str, Any]], units_per_order: int) -> None:
+        """Rescale consumption after the order quantity is derived from MES volume.
+
+        Order quantities are not known until the MES event target is known, and
+        consumption is the exploded requirement times the order quantity. Left
+        unscaled, the two would disagree and the Phase 3 variance metrics would
+        be measuring the generator rather than the business.
+        """
+        for row in consumption:
+            per_unit = row.pop("_quantity_per_unit", None)
+            if per_unit is None:
+                continue
+            row["quantity_consumed"] = per_unit * units_per_order
 
     def confirm(
         self,

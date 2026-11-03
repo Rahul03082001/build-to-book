@@ -248,6 +248,60 @@ CREATE UNIQUE INDEX IF NOT EXISTS component_consumption_nk
 CREATE INDEX IF NOT EXISTS component_consumption_material_idx
     ON raw.component_consumption (component_material_number);
 
+-- Unit-level MES events. One row per serial per step attempt -- about five
+-- million rows on the full profile, loaded in chunks (ADR-024).
+CREATE TABLE IF NOT EXISTS raw.mes_unit_events (
+    serial_number     text        NOT NULL,
+    order_number      text        NOT NULL,
+    material_number   text        NOT NULL,
+    step_name         text        NOT NULL,
+    step_sequence     integer     NOT NULL,
+    attempt           integer     NOT NULL,
+    station           text        NOT NULL,
+    -- Timestamps, not dates: burn-in dwell is measured in hours and cycle
+    -- time is a Phase 3 KPI.
+    started_at        timestamp   NOT NULL,
+    finished_at       timestamp   NOT NULL,
+    result            text        NOT NULL,
+    -- Null on a pass.
+    failure_code      text,
+    is_final_attempt  boolean     NOT NULL,
+    operator          text        NOT NULL,
+    _batch_id         text        NOT NULL,
+    _source_file      text        NOT NULL,
+    _file_sha256      char(64)    NOT NULL,
+    _loaded_at        timestamptz NOT NULL DEFAULT now()
+);
+-- The loader's anti-join probes this on every chunk, so it is not merely a
+-- uniqueness constraint: at five million rows a sequential scan per chunk
+-- would dominate the load.
+CREATE UNIQUE INDEX IF NOT EXISTS mes_unit_events_nk
+    ON raw.mes_unit_events (serial_number, step_sequence, attempt);
+-- CTRL-005 groups by order; the reconciliation reads every event.
+CREATE INDEX IF NOT EXISTS mes_unit_events_order_idx
+    ON raw.mes_unit_events (order_number);
+CREATE INDEX IF NOT EXISTS mes_unit_events_step_result_idx
+    ON raw.mes_unit_events (step_name, result);
+
+-- Production confirmations, derived from the MES outcome so CTRL-005
+-- reconciles exactly on a clean run.
+CREATE TABLE IF NOT EXISTS raw.production_confirmations (
+    order_number         text        NOT NULL,
+    confirmation_number  text        NOT NULL,
+    confirmed_quantity   integer     NOT NULL,
+    scrap_quantity       integer     NOT NULL,
+    uom                  text        NOT NULL,
+    confirmation_date    date        NOT NULL,
+    posting_date         date        NOT NULL,
+    entered_by           text        NOT NULL,
+    _batch_id            text        NOT NULL,
+    _source_file         text        NOT NULL,
+    _file_sha256         char(64)    NOT NULL,
+    _loaded_at           timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS production_confirmations_nk
+    ON raw.production_confirmations (order_number, confirmation_number);
+
 CREATE TABLE IF NOT EXISTS raw.inventory_revaluations (
     revaluation_document   text           NOT NULL,
     fiscal_year            integer        NOT NULL,
