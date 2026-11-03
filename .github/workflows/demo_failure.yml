@@ -90,8 +90,46 @@ jobs:
       - name: Install the project
         run: uv sync --extra dbt
 
-      - name: Not yet built
+      # The dropdown above is generated from the defect REGISTRY, which is the
+      # full specification -- every defect this project intends to plant. Only
+      # some have injectors; the rest arrive in later phases. So the menu
+      # legitimately offers choices that cannot run, and the reader has to be
+      # told which kind of "not yet" they hit.
+      - name: Explain the selected defect
+        id: defect
+        run: |
+          uv run scripts/explain_defect.py "$BTB_DEFECT" && status=0 || status=$?
+          if [ "$status" = "2" ]; then
+            echo "::error::$BTB_DEFECT is not a defect in the registry."
+            exit 1
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: The demo itself is not built yet
+        env:
+          # Read through the environment rather than interpolated into the
+          # script body, which is the pattern that keeps a step output from
+          # being able to run as shell.
+          DEFECT_STATUS: ${{ steps.defect.outputs.status }}
         run: |
           echo "::notice::The failure demo lands in Phase 6 (BTB-67)."
-          echo "Would plant: $BTB_DEFECT into schema $BTB_TARGET_SCHEMA"
+          echo "Would plant: $BTB_DEFECT"
+          echo "Into schema: $BTB_TARGET_SCHEMA (layer prefix $SCHEMA_PREFIX)"
+          echo
+          if [ "$DEFECT_STATUS" = "3" ]; then
+            echo "TWO things are missing here, not one:"
+            echo "  1. this defect's injector -- see the phase named above"
+            echo "  2. the demo workflow body -- Phase 6 (BTB-67)"
+            echo
+            echo "Choose duplicate_goods_receipt or backdated_gl_posting to be"
+            echo "waiting on the second only."
+          else
+            echo "This defect's injector exists; only the demo body is missing."
+            echo "Until Phase 6 lands, plant it locally:"
+            echo "  make data DEFECTS=$BTB_DEFECT"
+            echo "  make reload && make build && make controls"
+          fi
+          echo
+          echo "Exiting non-zero because the demo did not run. A green run here"
+          echo "would mean a blocked publish was demonstrated, and it was not."
           exit 1

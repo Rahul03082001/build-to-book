@@ -113,6 +113,10 @@ data: ## Generate synthetic source extracts + control totals
 	$(PY) -m generator --profile $(PROFILE) --seed $(SEED) \
 		$(foreach d,$(DEFECTS),--defect $(d))
 
+.PHONY: explain-defect
+explain-defect: ## Explain a defect and whether its injector is built (DEFECT=key, or all)
+	$(PY) scripts/explain_defect.py $(if $(DEFECT),$(DEFECT),--list)
+
 .PHONY: data-defects
 data-defects: ## Generate extracts with every implemented defect planted
 	$(PY) -m generator --profile $(PROFILE) --seed $(SEED) --defect all

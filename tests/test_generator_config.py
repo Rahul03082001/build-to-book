@@ -10,6 +10,8 @@ complete.
 from __future__ import annotations
 
 import datetime as dt
+import pathlib
+from typing import Any
 
 import pytest
 
@@ -185,3 +187,147 @@ def test_the_supplier_late_delivery_rate_is_declared_and_plausible(
         f"a {rate:.0%} late rate means on-time delivery is {1 - rate:.0%}, which is "
         "not a supply chain worth reporting on"
     )
+
+
+# ---------------------------------------------------------------------------
+# scripts/explain_defect.py
+#
+# The failure-demo workflow branches on this script's exit code, and that
+# workflow is workflow_dispatch-only -- it never runs in CI, so a mistake in it
+# stays invisible until someone clicks the button. Which is exactly the fault
+# the script was written to fix, so the contract it offers is pinned here.
+# ---------------------------------------------------------------------------
+def _explain_defect() -> Any:
+    import importlib.util
+
+    path = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "explain_defect.py"
+    spec = importlib.util.spec_from_file_location("explain_defect", path)
+    assert spec is not None and spec.loader is not None, f"cannot load {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_an_implemented_defect_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    module = _explain_defect()
+    assert module.main(["duplicate_goods_receipt"]) == module.EXIT_READY
+    out = capsys.readouterr().out
+    assert "CTRL-001" in out, "the expected control must be named"
+    assert "--defect duplicate_goods_receipt" in out, "it should say how to plant it"
+
+
+def test_an_unbuilt_injector_exits_three_and_says_which_phase(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exit 3 is what the workflow reads to say TWO things are missing, not one.
+
+    A reader who picks a Phase 2 defect today is hitting both an unbuilt
+    injector and an unbuilt demo. Collapsing those into one `exit 1` is what
+    made the old stub unreadable.
+    """
+    module = _explain_defect()
+    assert module.main(["missing_supplier_on_shipment"]) == module.EXIT_NOT_IMPLEMENTED
+    out = capsys.readouterr().out
+    assert "Phase 2" in out, "the phase that builds the injector must be named"
+    assert "not a mistake" in out, (
+        "choosing a listed-but-unbuilt defect is a reasonable thing to do and "
+        "the output should say so rather than implying user error"
+    )
+    # And it must name what *can* be run instead.
+    assert "duplicate_goods_receipt" in out
+
+
+def test_an_unknown_defect_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
+    """Distinct from exit 3: the workflow fails fast on this one.
+
+    A key that is not in the registry means the dropdown and the registry have
+    drifted apart, which is a repo fault rather than a phase boundary.
+    """
+    module = _explain_defect()
+    assert module.main(["no_such_defect"]) == module.EXIT_UNKNOWN
+    out = capsys.readouterr().out
+    assert "not a defect in the registry" in out
+    assert "duplicate_goods_receipt" in out, "it should list what is known"
+
+
+def test_the_three_exit_codes_are_distinct() -> None:
+    """The workflow branches on them, so collapsing two would merge two cases."""
+    module = _explain_defect()
+    codes = {module.EXIT_READY, module.EXIT_UNKNOWN, module.EXIT_NOT_IMPLEMENTED}
+    assert len(codes) == 3, f"exit codes collide: {codes}"
+    assert module.EXIT_READY == 0, "success must be zero"
+
+
+def test_listing_every_defect_reports_each_injector_state(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from generator import defects
+
+    module = _explain_defect()
+    assert module.main(["--list"]) == module.EXIT_READY
+    out = capsys.readouterr().out
+    for key in defects.REGISTRY:
+        assert key in out, f"{key} is missing from the listing"
+    assert f"{len(defects.INJECTORS)} of {len(defects.REGISTRY)} injectors built" in out
+
+
+def test_every_dropdown_option_is_a_registered_defect() -> None:
+    """The workflow's choice list and the registry must not drift.
+
+    An option that is not in the registry would exit 2 and fail the run with
+    "not a defect in the registry" -- a repo fault presented to whoever
+    clicked, after a four-minute dependency install.
+    """
+    import yaml
+
+    from generator import defects
+
+    workflow = yaml.safe_load(
+        (
+            pathlib.Path(__file__).resolve().parent.parent
+            / ".github"
+            / "workflows"
+            / "demo_failure.yml"
+        ).read_text()
+    )
+    triggers = workflow.get(True, workflow.get("on"))
+    options = triggers["workflow_dispatch"]["inputs"]["defect"]["options"]
+
+    unknown = sorted(set(options) - set(defects.REGISTRY))
+    assert not unknown, f"dropdown offers defect(s) not in the registry: {unknown}"
+    missing = sorted(set(defects.REGISTRY) - set(options))
+    assert not missing, f"registry defect(s) the dropdown does not offer: {missing}"
+
+    default = triggers["workflow_dispatch"]["inputs"]["defect"]["default"]
+    assert default in defects.INJECTORS, (
+        f"the default option {default!r} has no injector, so the button's "
+        "out-of-the-box behaviour is the least informative path"
+    )
+
+
+def test_the_command_it_prints_plants_only_the_chosen_defect(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The printed `make` command must do what the text claims.
+
+    `make data-defects` takes no DEFECTS variable -- it passes `--defect all`
+    and plants every implemented defect. The first version of this script
+    printed `make data-defects DEFECTS=<key>`, which would have quietly planted
+    more than the reader asked for while appearing to name one. Found by
+    reading the target rather than by any test, which is why this exists.
+    """
+    module = _explain_defect()
+    module.main(["duplicate_goods_receipt"])
+    printed = capsys.readouterr().out
+
+    assert "make data DEFECTS=duplicate_goods_receipt" in printed
+    assert "data-defects" not in printed, (
+        "data-defects ignores DEFECTS and plants every defect, so naming it "
+        "beside a single key misrepresents what the command does"
+    )
+
+    makefile = (pathlib.Path(__file__).resolve().parent.parent / "Makefile").read_text()
+    # The `data` target must actually forward DEFECTS, or the command above is
+    # wrong in the other direction.
+    data_target = makefile.split("\ndata:", 1)[1].split("\n.PHONY", 1)[0]
+    assert "DEFECTS" in data_target, "make data no longer forwards DEFECTS"
