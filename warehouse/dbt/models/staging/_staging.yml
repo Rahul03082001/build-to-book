@@ -511,6 +511,28 @@ models:
             config:
               where: "result = 'PASS'"
 
+  - name: stg_chart_of_accounts
+    description: >
+      GRAIN: one row per general ledger account.
+    columns:
+      - name: gl_account
+        data_tests: [unique, not_null]
+      - name: account_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["ASSET", "LIABILITY", "EQUITY", "EXPENSE"]
+      - name: normal_balance
+        data_tests: [not_null]
+      - name: is_balance_sheet
+        data_tests: [not_null]
+      - name: is_income_statement
+        description: >
+          The complement of is_balance_sheet, derived once here so no model has
+          to decide what counts as which.
+        data_tests: [not_null]
+
   - name: stg_shipment_headers
     description: >
       GRAIN: one row per inbound delivery.

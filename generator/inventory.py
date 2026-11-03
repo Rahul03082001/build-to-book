@@ -42,7 +42,7 @@ from typing import Any
 
 import numpy as np
 
-from generator import defects, ids
+from generator import accounts, defects, ids
 from generator.config import GeneratorConfig, Profile
 from generator.writers import ExtractSpec, money
 
@@ -77,14 +77,23 @@ MOVEMENT_SIGN = {MVT_GOODS_RECEIPT: 1, MVT_GOODS_ISSUE: -1, MVT_INITIAL_STOCK: 1
 # ---------------------------------------------------------------------------
 # Chart of accounts (the inventory corner of it).
 # ---------------------------------------------------------------------------
-ACCOUNT_INVENTORY = "130000"  # Inventory - raw materials (asset)
-ACCOUNT_GR_IR_CLEARING = "191100"  # Goods received / invoice received (liability)
-ACCOUNT_CONSUMPTION = "510000"  # Raw material consumption (expense)
-ACCOUNT_INVENTORY_REVALUATION = "231000"  # Standard cost revaluation / price difference
+# Account numbers come from the declared chart of accounts (BTB-35), not from
+# literals here. They used to be four constants whose type lived in a trailing
+# comment, so nothing could ask whether a posting was to an asset or an
+# expense -- a balance sheet and an income statement could not be separated,
+# and `debit_credit_indicator` could not be checked against what the account
+# normally does.
+ACCOUNT_INVENTORY = accounts.INVENTORY_RAW.number
+ACCOUNT_GR_IR_CLEARING = accounts.GR_IR_CLEARING.number
+#: Where a component issue lands. ADR-028 moves this from an expense account to
+#: work in process: issuing a component to an order capitalises it, it does not
+#: consume it. The name is kept for now and the chain lands with the WIP work.
+ACCOUNT_CONSUMPTION = accounts.COST_OF_GOODS_SOLD.number
+ACCOUNT_INVENTORY_REVALUATION = accounts.PRICE_DIFFERENCE.number
 #: Offsets opening stock. A real opening balance comes from the prior period's
 #: closing balance sheet; with no prior period in the data, the counter-entry
 #: goes to retained earnings so the opening trial balance still nets to zero.
-ACCOUNT_OPENING_BALANCE = "399000"  # Retained earnings / opening balance
+ACCOUNT_OPENING_BALANCE = accounts.OPENING_BALANCE.number
 
 # SAP debit/credit indicators.
 DEBIT = "S"

@@ -192,6 +192,28 @@ CREATE INDEX IF NOT EXISTS goods_movements_delivery_idx
 CREATE INDEX IF NOT EXISTS goods_movements_order_idx
     ON raw.goods_movements (order_number);
 
+-- The chart of accounts (BTB-35). Master data from finance: every account the
+-- postings reference, with its type and the side that normally increases it.
+-- Account numbers used to be constants in Python with the type in a comment,
+-- so nothing could ask whether a posting was to an asset or an expense.
+CREATE TABLE IF NOT EXISTS raw.chart_of_accounts (
+    gl_account       text        NOT NULL,
+    account_name     text        NOT NULL,
+    account_type     text        NOT NULL,
+    -- DEBIT or CREDIT: the side that increases this account.
+    normal_balance   text        NOT NULL,
+    -- Balance sheet or income statement. A trial balance needs both and needs
+    -- to know which is which.
+    is_balance_sheet boolean     NOT NULL,
+    account_purpose  text        NOT NULL,
+    _batch_id        text        NOT NULL,
+    _source_file     text        NOT NULL,
+    _file_sha256     char(64)    NOT NULL,
+    _loaded_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS chart_of_accounts_nk
+    ON raw.chart_of_accounts (gl_account);
+
 -- Inbound deliveries, shaped on SAP's LIKP and LIPS. An advance ship notice
 -- is a promise that arrives before the goods do, so every receipt records the
 -- delivery it came in on (ADR-026).

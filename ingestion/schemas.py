@@ -31,6 +31,8 @@ import datetime as dt
 import pandera.pandas as pa
 from pandera.pandas import Column, DataFrameSchema
 
+from generator import accounts as _accounts
+
 # Plausible fiscal years. Narrow on purpose: a mis-parsed date usually lands
 # far outside this range, and catching it at load is much cheaper than
 # explaining a missing period later.
@@ -48,6 +50,11 @@ _MOVEMENT_TYPES = ["101", "261", "561"]
 #: it; IN_TRANSIT means the shipment is still on the water at period end,
 #: which is an open commitment rather than a missing receipt (ADR-026).
 _SHIPMENT_STATUSES = ["RECEIVED", "IN_TRANSIT"]
+
+#: Account types and normal balances, from the declared chart of accounts so
+#: validation and the generator cannot disagree about what is allowed.
+_ACCOUNT_TYPES = sorted({a.account_type for a in _accounts.ACCOUNTS})
+_NORMAL_BALANCES = sorted({a.normal_balance for a in _accounts.ACCOUNTS})
 
 _DEBIT_CREDIT = ["S", "H"]
 
@@ -414,6 +421,19 @@ SCHEMAS: dict[str, DataFrameSchema] = {
         coerce=True,
         name="goods_movements",
     ),
+    "chart_of_accounts": DataFrameSchema(
+        {
+            "gl_account": _code(),
+            "account_name": _text(),
+            "account_type": _code(_ACCOUNT_TYPES),
+            "normal_balance": _code(_NORMAL_BALANCES),
+            "is_balance_sheet": Column(bool, coerce=True),
+            "account_purpose": _text(),
+        },
+        strict=True,
+        coerce=True,
+        name="chart_of_accounts",
+    ),
     "shipment_headers": DataFrameSchema(
         {
             "inbound_delivery": _code(),
@@ -533,6 +553,7 @@ NATURAL_KEYS: dict[str, tuple[str, ...]] = {
     "purchase_order_lines": ("po_number", "po_item"),
     # Material document numbers repeat across fiscal years (ADR-020).
     "goods_movements": ("material_document", "fiscal_year", "material_document_item"),
+    "chart_of_accounts": ("gl_account",),
     "shipment_headers": ("inbound_delivery",),
     "shipment_lines": ("inbound_delivery", "shipment_item"),
     "inventory_revaluations": ("revaluation_document", "fiscal_year"),

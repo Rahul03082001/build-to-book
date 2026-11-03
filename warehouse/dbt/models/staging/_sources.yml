@@ -129,6 +129,30 @@ sources:
               -- the generator raises instead, and a dbt test asserts every
               receipt with a known purchase order names a delivery.
 
+      - name: chart_of_accounts
+        description: >
+          The chart of accounts. Master data from finance: every account the
+          postings reference, with its type and the side that normally
+          increases it (BTB-35).
+        columns:
+          - name: gl_account
+            data_tests: [unique, not_null]
+          - name: account_type
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["ASSET", "LIABILITY", "EQUITY", "EXPENSE"]
+          - name: normal_balance
+            description: DEBIT or CREDIT -- the side that increases the account.
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["DEBIT", "CREDIT"]
+          - name: is_balance_sheet
+            data_tests: [not_null]
+
       - name: shipment_headers
         description: >
           Inbound deliveries, shaped on SAP's LIKP. One row per advance ship

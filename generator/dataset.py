@@ -20,13 +20,26 @@ import pathlib
 from collections.abc import Sequence
 from typing import Any
 
-from generator import bom, defects, inventory, invoices, mes, production, shipments, writers
+from generator import (
+    accounts,
+    bom,
+    defects,
+    inventory,
+    invoices,
+    mes,
+    production,
+    shipments,
+    writers,
+)
 from generator.config import GeneratorConfig
 from generator.writers import ExtractSpec
 
 #: Every extract, in load order: masters before the documents that reference
 #: them, so a foreign-key problem surfaces against data already present.
 EXTRACT_SPECS: dict[str, ExtractSpec] = {
+    # Master data from finance, first: every posting references an account, so
+    # the chart has to be present before any document that names one.
+    "chart_of_accounts": accounts.EXTRACT_SPECS["chart_of_accounts"],
     "materials": inventory.EXTRACT_SPECS["materials"],
     "suppliers": inventory.EXTRACT_SPECS["suppliers"],
     "standard_costs": inventory.EXTRACT_SPECS["standard_costs"],
@@ -313,6 +326,9 @@ def build(
     )
 
     produced: dict[str, list[dict[str, Any]]] = {
+        # Static master data: a chart of accounts is maintained by finance, not
+        # invented by a run.
+        "chart_of_accounts": accounts.rows(),
         "shipment_headers": shipment_outcome.headers,
         "shipment_lines": shipment_outcome.lines,
         **inventory_data.as_mapping(),
