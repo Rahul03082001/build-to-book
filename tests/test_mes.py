@@ -23,6 +23,7 @@ import collections
 import contextlib
 import datetime as dt
 import pathlib
+import re
 import resource
 import subprocess
 from collections.abc import Iterator
@@ -34,6 +35,27 @@ import pytest
 import tests.conftest as conftest
 from generator import config as genconfig
 from generator import dataset, mes, writers
+
+
+def _load_verifier() -> Any:
+    """Load scripts/verify_mes_extract.py by path.
+
+    `scripts/` is deliberately not a package: pyproject lists the four modules
+    that ship in the distribution, and a CLI used by `make verify-mes` and CI
+    is not one of them. Importing by path keeps the script a script while
+    letting its invariants be tested.
+    """
+    import importlib.util
+
+    path = conftest.REPO_ROOT / "scripts" / "verify_mes_extract.py"
+    spec = importlib.util.spec_from_file_location("verify_mes_extract", path)
+    assert spec is not None and spec.loader is not None, f"cannot load {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+verify_mes_extract = _load_verifier()
 
 
 @pytest.fixture(scope="module")
@@ -492,3 +514,142 @@ def test_the_live_marts_survive_the_sandbox_mutations(
     assert all(r.passed for r in results), (
         f"the live build did not survive the mutations: {[r.detail for r in results]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The standalone verifier
+#
+# scripts/verify_mes_extract.py recomputes the invariants from the written
+# files, which is how the full profile's figures are checked -- five million
+# events are too slow for the suite. These tests run it on the demo profile and,
+# more importantly, prove it fails when the extract is wrong. A verifier that
+# has only ever passed is a script that prints numbers.
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def demo_extract(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    out = tmp_path_factory.mktemp("mes-extract")
+    conftest.generate_extracts(out)
+    return out
+
+
+def test_the_verifier_passes_a_clean_extract(demo_extract: pathlib.Path) -> None:
+    report = verify_mes_extract.verify(demo_extract)
+    assert report["violations"] == []
+    assert report["units_started"] > 0
+    assert report["units_completed"] + report["units_scrapped"] == report["units_started"]
+
+
+def test_the_verifier_exits_zero_on_a_clean_extract(demo_extract: pathlib.Path) -> None:
+    """The exit code is what `make verify-mes` and CI act on."""
+    assert verify_mes_extract.main([str(demo_extract), "--json"]) == 0
+
+
+def _rewrite(path: pathlib.Path, rows: list[dict[str, str]]) -> None:
+    import csv
+
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _rows(path: pathlib.Path) -> list[dict[str, str]]:
+    import csv
+
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def test_the_verifier_catches_offsetting_confirmation_errors(
+    demo_extract: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """The case a total-only check cannot see.
+
+    One order gains a unit and another loses one, so the grand total still
+    agrees exactly. This is why the comparison is per order: an aggregate that
+    reconciles is not evidence that its parts do.
+    """
+    import shutil
+
+    work = tmp_path / "offsetting"
+    shutil.copytree(demo_extract, work)
+    confirmations = work / "production_confirmations.csv"
+    rows = _rows(confirmations)
+    rows[0]["confirmed_quantity"] = str(int(rows[0]["confirmed_quantity"]) + 1)
+    rows[1]["confirmed_quantity"] = str(int(rows[1]["confirmed_quantity"]) - 1)
+    _rewrite(confirmations, rows)
+
+    before = sum(
+        int(r["confirmed_quantity"]) for r in _rows(demo_extract / "production_confirmations.csv")
+    )
+    after = sum(int(r["confirmed_quantity"]) for r in rows)
+    assert before == after, "the mutation must leave the grand total unchanged to be meaningful"
+
+    report = verify_mes_extract.verify(work)
+    assert report["violations"], "offsetting per-order errors were not detected"
+    assert "disagree with their confirmations" in " ".join(report["violations"])
+
+
+def test_the_verifier_catches_a_truncated_write(
+    demo_extract: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """A dropped final_test row makes a completed unit look scrapped."""
+    import shutil
+
+    work = tmp_path / "truncated"
+    shutil.copytree(demo_extract, work)
+    events = work / "mes_unit_events.csv"
+    rows = _rows(events)
+    serial = rows[-1]["serial_number"]
+    kept = [
+        r for r in rows if not (r["serial_number"] == serial and r["step_name"] == "final_test")
+    ]
+    assert len(kept) < len(rows), "the mutation removed nothing"
+    _rewrite(events, kept)
+
+    report = verify_mes_extract.verify(work)
+    assert report["violations"], "a dropped final_test row was not detected"
+
+
+def test_the_verifier_catches_a_duplicated_event(
+    demo_extract: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    import shutil
+
+    work = tmp_path / "duplicated"
+    shutil.copytree(demo_extract, work)
+    events = work / "mes_unit_events.csv"
+    rows = _rows(events)
+    _rewrite(events, [*rows, dict(rows[10])])
+
+    report = verify_mes_extract.verify(work)
+    assert any("appear twice" in v for v in report["violations"]), report["violations"]
+
+
+def test_an_unreadable_extract_is_not_a_pass(tmp_path: pathlib.Path) -> None:
+    """Exit 2, not 0.
+
+    A missing file means nothing was verified, which must not be reported as
+    "every invariant holds" -- that is how an empty run becomes evidence.
+    """
+    assert verify_mes_extract.main([str(tmp_path)]) == 2
+    with pytest.raises(verify_mes_extract.ExtractUnreadableError):
+        verify_mes_extract.verify(tmp_path)
+
+
+def test_the_make_target_and_the_script_agree_on_the_default_directory(
+    repo_root: pathlib.Path,
+) -> None:
+    """`make verify-mes` with no arguments must point at where `make data` wrote.
+
+    If the two drifted, the target would verify a stale extract, or none, and
+    report a pass either way for the second reason.
+    """
+    import yaml
+
+    makefile = (repo_root / "Makefile").read_text()
+    match = re.search(r"^EXTRACT_DIR\s*\?=\s*(\S+)", makefile, re.MULTILINE)
+    assert match, "the Makefile declares no EXTRACT_DIR"
+
+    config = yaml.safe_load((repo_root / "generator" / "config.yaml").read_text())
+    assert match.group(1) == config["output"]["directory"]

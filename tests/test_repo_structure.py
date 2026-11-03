@@ -67,6 +67,7 @@ REQUIRED_FILES = [
     "ingestion/__main__.py",
     "scripts/psql.sh",
     "scripts/check_commit_message.py",
+    "scripts/verify_mes_extract.py",
     "warehouse/dbt/dbt_project.yml",
     "warehouse/dbt/packages.yml",
     "warehouse/dbt/package-lock.yml",
@@ -154,7 +155,7 @@ def test_env_file_is_gitignored(repo_root: pathlib.Path) -> None:
     assert ".env" in ignored, ".env must be gitignored"
 
 
-@pytest.mark.parametrize("script", ["check_commit_message.py", "psql.sh"])
+@pytest.mark.parametrize("script", ["check_commit_message.py", "psql.sh", "verify_mes_extract.py"])
 def test_scripts_are_executable(repo_root: pathlib.Path, script: str) -> None:
     """A script the Makefile invokes directly must carry its exec bit."""
     path = repo_root / "scripts" / script
