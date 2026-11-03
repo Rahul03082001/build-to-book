@@ -46,6 +46,21 @@ def dsn(role: str | None = None) -> str:
         "dbname": os.environ.get("POSTGRES_DB", "btb"),
         "user": user,
         "password": password,
+        # Fail fast when nothing answers.
+        #
+        # Without this libpq waits indefinitely, and a database that ACCEPTS a
+        # connection and then never replies hangs rather than erroring -- which
+        # is not hypothetical. Docker Desktop was installed on an external
+        # drive; the drive disconnected, the daemon wedged, and its port
+        # forwarder went on accepting TCP while Postgres was gone. The test
+        # suite's skip path catches OperationalError, but a hang never raises
+        # one, so a 100-second run sat blocked for fifteen minutes and reported
+        # nothing at all.
+        #
+        # A bounded wait turns that into a skip with a reason. Overridable,
+        # because a cold hosted instance can legitimately take longer to accept
+        # than a local container.
+        "connect_timeout": os.environ.get("BTB_CONNECT_TIMEOUT", "10"),
     }
     return " ".join(f"{key}={value}" for key, value in parts.items() if value != "")
 
@@ -56,5 +71,11 @@ def connect(role: str | None = None) -> psycopg.Connection:
     ``autocommit=False`` is deliberate: the loader manages its own
     transactions so the staging table, the insert and the reject log commit
     together, while the audit row commits separately and survives a failure.
+
+    Raises:
+        psycopg.OperationalError: if the database does not answer within
+            ``connect_timeout`` (see `dsn`). Callers that treat an unreachable
+            warehouse as a skip depend on this being an error rather than a
+            wait.
     """
     return psycopg.connect(dsn(role), autocommit=False)
