@@ -14,7 +14,7 @@ import re
 
 import pytest
 
-from controls import checks
+from controls import checks, runner
 
 MATRIX = pathlib.Path(__file__).resolve().parent.parent / "docs" / "control_matrix.csv"
 
@@ -90,19 +90,57 @@ def test_check_sql_is_parameterised_not_interpolated() -> None:
             )
 
 
-def test_check_sql_targets_the_schema_placeholder() -> None:
-    """The same check must run against candidate, sandbox or reporting.
+def test_check_sql_names_the_layer_it_reads() -> None:
+    """Every check must name its layer, so a sandbox run reads the sandbox build.
 
-    That is what lets the Phase 6 failure demo run against `sandbox` with the
-    identical controls, rather than a second copy that could drift.
+    Two checks hardcoded `intermediate.` and `staging.`, which would have made
+    the Phase 6 failure demo assess production data while the workflow claimed
+    otherwise. Found by running the demo's own target and seeing 14 models land
+    in `staging` and none in `sandbox`.
     """
+    placeholders = {"{marts}", "{intermediate}", "{staging}"}
     for check in checks.PHASE_1_CHECKS:
-        # Audit-trail checks are schema-independent by nature.
-        if "audit." in check.sql and "{schema}" not in check.sql:
+        # Audit-trail checks are schema-independent: the trail is one table,
+        # not a rebuilt layer.
+        if "audit." in check.sql and not any(p in check.sql for p in placeholders):
             continue
-        assert "{schema}" in check.sql, (
-            f"{check.check_id} hardcodes a schema instead of using {{schema}}"
+        assert any(p in check.sql for p in placeholders), (
+            f"{check.check_id} hardcodes a schema instead of naming its layer"
         )
+
+
+def test_no_check_hardcodes_a_build_layer() -> None:
+    """A literal `marts.` or `staging.` would read production from a sandbox run."""
+    import re
+
+    for check in checks.PHASE_1_CHECKS:
+        for layer in ("staging", "intermediate", "marts"):
+            # Allow the placeholder; refuse the bare name followed by a dot.
+            bare = re.search(rf"(?<![{{\w]){layer}\.", check.sql)
+            assert bare is None, f"{check.check_id} reads {layer}. directly; use {{{layer}}}"
+
+
+def test_layer_schemas_mirror_the_dbt_macro() -> None:
+    """The controls and dbt must agree about where a build lives.
+
+    If they disagreed, the controls would assess a build nobody made -- and
+    pass, because an empty schema has no exceptions.
+    """
+    assert runner.layer_schemas("") == {
+        "staging": "staging",
+        "intermediate": "intermediate",
+        "marts": "marts",
+    }
+    assert runner.layer_schemas("sandbox_") == {
+        "staging": "sandbox_staging",
+        "intermediate": "sandbox_intermediate",
+        "marts": "sandbox_marts",
+    }
+
+
+def test_unknown_schema_prefix_is_refused() -> None:
+    with pytest.raises(runner.UnknownTargetSchemaError):
+        runner.layer_schemas("production_")
 
 
 def test_no_check_references_reporting_directly() -> None:
@@ -151,10 +189,8 @@ def test_closed_period_control_is_implemented() -> None:
     deliberate omission so it could not be forgotten, and it failed the moment
     the omission was filled -- which is what told me to update it.
     """
-    from controls import checks as check_module
-
     assert "CTRL-006" in {c.check_id for c in checks.PHASE_1_CHECKS}
-    control = check_module.CLOSED_PERIOD_INTEGRITY
+    control = checks.CLOSED_PERIOD_INTEGRITY
     assert control.severity == checks.SEVERITY_CRITICAL, (
         "a backdated posting restates reported figures, so detecting it after "
         "publishing is too late -- it has to block"

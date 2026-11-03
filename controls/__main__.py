@@ -26,10 +26,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the reconciliations and optionally publish.",
     )
     parser.add_argument(
-        "--schema",
-        default="marts",
-        choices=sorted(runner.ALLOWED_TARGET_SCHEMAS),
-        help="Schema to check. Use sandbox for the failure demo.",
+        "--schema-prefix",
+        default="",
+        choices=sorted(runner.ALLOWED_SCHEMA_PREFIXES),
+        help=(
+            "Which build to check. Empty is the live build; sandbox_ is the "
+            "failure demo, which reads sandbox_staging/intermediate/marts and "
+            "never production."
+        ),
     )
     parser.add_argument(
         "--batch-id",
@@ -70,10 +74,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print(BANNER)
-        print(f"schema={args.schema}  batch={batch_id}  commit={commit[:12]}")
+        print(f"schemas={runner.layer_schemas(args.schema_prefix)}  batch={batch_id}")
+        print(f"commit={commit[:12]}")
         print()
 
-        summary = runner.run_checks(conn, args.schema, batch_id)
+        summary = runner.run_checks(conn, args.schema_prefix, batch_id)
 
         header = f"{'control':10}{'period':24}{'result':8}check"
         print(header)

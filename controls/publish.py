@@ -48,8 +48,18 @@ PUBLISHED_MARTS: tuple[str, ...] = (
     "dim_material_current",
 )
 
-#: Build schema the gate copies from.
-BUILD_SCHEMA = "marts"
+#: Layer the gate copies from. Combined with the run's schema prefix, so a
+#: sandbox publish copies from sandbox_marts rather than production marts.
+BUILD_LAYER = "marts"
+
+
+def build_schema(schema_prefix: str = "") -> str:
+    """The marts schema for a given prefix. Mirrors dbt's generate_schema_name."""
+    return f"{schema_prefix}{BUILD_LAYER}"
+
+
+#: Kept for callers that only ever publish the live build.
+BUILD_SCHEMA = build_schema()
 
 #: Versions of each mart kept in `reporting`: the one being served and the one
 #: before it. Two copies of every mart is already most of a 1 GB free tier

@@ -121,6 +121,65 @@ sources:
             description: Valued at the standard cost in force on the posting date.
             data_tests: [not_null]
 
+      - name: supplier_invoice_headers
+        description: >
+          Supplier invoice headers, shaped on SAP's RBKP. One row per invoice.
+          Invoice numbers repeat across fiscal years, so the year is part of
+          the key.
+        columns:
+          - name: invoice_number
+            data_tests: [not_null]
+          - name: supplier_number
+            data_tests: [not_null]
+          - name: gross_amount_usd
+            description: Sum of the invoice's lines.
+            data_tests: [not_null]
+
+      - name: supplier_invoice_lines
+        description: >
+          Supplier invoice items, shaped on SAP's RSEG. The third leg of the
+          three-way match: each line references the PO line it pays for.
+        columns:
+          - name: invoice_number
+            data_tests: [not_null]
+          - name: po_number
+            data_tests: [not_null]
+          - name: quantity_invoiced
+            description: What the supplier billed. Compared against the quantity received.
+            data_tests: [not_null]
+
+      - name: production_orders
+        description: >
+          Production orders. One row per order, building a quantity of one
+          rack configuration.
+        columns:
+          - name: order_number
+            data_tests: [unique, not_null]
+          - name: material_number
+            description: The rack configuration being built.
+            data_tests: [not_null]
+          - name: target_quantity
+            data_tests: [not_null]
+          - name: status
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["REL", "CNF", "TECO"]
+
+      - name: component_consumption
+        description: >
+          Components issued to a production order, following the order's
+          exploded BOM. Quantity consumed is the exploded requirement times
+          the order quantity.
+        columns:
+          - name: order_number
+            data_tests: [not_null]
+          - name: component_material_number
+            data_tests: [not_null]
+          - name: quantity_consumed
+            data_tests: [not_null]
+
       - name: inventory_revaluations
         description: >
           Value-only entries posted when a standard cost changes (ADR-023).
